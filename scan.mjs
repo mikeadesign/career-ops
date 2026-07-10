@@ -431,7 +431,7 @@ export function loadSeenUrls(policy = {}) {
 //
 // Sources read (closes Gap 1 — formerly only applications.md):
 //   1. applications.md table rows
-//   2. pipeline.md ## Pendientes and ## Procesadas entries
+//   2. pipeline.md ## Pending and ## Processed entries
 function loadSeenCompanyRoles() {
   const byCompany = new Map();
 
@@ -448,8 +448,8 @@ function loadSeenCompanyRoles() {
   }
 
   // pipeline.md: two formats share a regex via an optional `#NUM |` prefix.
-  //   - Pendientes: `- [ ] URL | Company | Role [| Location...]`
-  //   - Procesadas: `- [x] #NUM | URL | Company | Role | ...`
+  //   - Pending: `- [ ] URL | Company | Role [| Location...]`
+  //   - Processed: `- [x] #NUM | URL | Company | Role | ...`
   if (existsSync(PIPELINE_PATH)) {
     const text = readFileSync(PIPELINE_PATH, 'utf-8');
     const pattern = /^- \[[ x!]\]\s+(?:#\d+\s*\|\s*)?\S+\s*\|\s*([^|\n]+?)\s*\|\s*([^|\n]+?)(?:\s*\|.*)?$/gm;
@@ -518,28 +518,46 @@ function formatPipelineLine(o) {
 export function appendToPipeline(offers) {
   if (offers.length === 0) return;
 
-  let text = readFileSync(PIPELINE_PATH, 'utf-8');
+  const text = readFileSync(PIPELINE_PATH, 'utf-8');
+  const lines = text.split('\n');
 
-  // Find "## Pendientes" section and append after it
-  const marker = '## Pendientes';
-  const idx = text.indexOf(marker);
-  if (idx === -1) {
-    // No Pendientes section — append at end before Procesadas
-    const procIdx = text.indexOf('## Procesadas');
-    const insertAt = procIdx === -1 ? text.length : procIdx;
-    const block = `\n${marker}\n\n` + offers.map(formatPipelineLine).join('\n') + '\n\n';
-    text = text.slice(0, insertAt) + block + text.slice(insertAt);
-  } else {
-    // Find the end of existing Pendientes content (next ## or end)
-    const afterMarker = idx + marker.length;
-    const nextSection = text.indexOf('\n## ', afterMarker);
-    const insertAt = nextSection === -1 ? text.length : nextSection;
+  // Match the real "## Pending" header as an exact header line (accepts the
+  // legacy "## Pendientes" spelling too). This MUST be a line-exact match,
+  // not a raw substring search — old "## Filtered (mid-...)" archive blocks
+  // contain restore-instruction comments that literally say "move lines
+  // back to ## Pendientes", and a substring match on that text previously
+  // caused new offers to be inserted into the wrong (archived) section.
+  const isPendingHeader = (line) => /^##\s+(Pending|Pendientes)\s*$/.test(line.trim());
+  const isProcessedHeader = (line) => /^##\s+(Processed|Procesadas)\s*$/.test(line.trim());
+  const isAnyHeader = (line) => line.startsWith('## ');
 
-    const block = '\n' + offers.map(formatPipelineLine).join('\n') + '\n';
-    text = text.slice(0, insertAt) + block + text.slice(insertAt);
+  let pStart = -1;
+  let insertLineIdx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (isPendingHeader(lines[i])) {
+      pStart = i;
+      insertLineIdx = lines.length;
+      for (let j = i + 1; j < lines.length; j++) {
+        if (isAnyHeader(lines[j])) { insertLineIdx = j; break; }
+      }
+      break;
+    }
   }
 
-  writeFileSync(PIPELINE_PATH, text, 'utf-8');
+  const newLines = offers.map(formatPipelineLine);
+
+  if (pStart === -1) {
+    // No Pending section — create one before Processed (or at end of file).
+    let procIdx = lines.length;
+    for (let i = 0; i < lines.length; i++) {
+      if (isProcessedHeader(lines[i])) { procIdx = i; break; }
+    }
+    lines.splice(procIdx, 0, '## Pending', '', ...newLines, '');
+  } else {
+    lines.splice(insertLineIdx, 0, ...newLines);
+  }
+
+  writeFileSync(PIPELINE_PATH, lines.join('\n'), 'utf-8');
 }
 
 export function appendToScanHistory(offers, date, status = 'added') {

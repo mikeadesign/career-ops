@@ -60,6 +60,10 @@ const SELECTORS = {
   // case if LinkedIn renames the wrapper class again.
   panelTitle: '.job-details-jobs-unified-top-card__job-title h1, h1.t-24, h1',
   panelCompany: '.job-details-jobs-unified-top-card__company-name a, .job-details-jobs-unified-top-card__company-name',
+  // The "primary description" line under the title holds location, posted
+  // time, and applicant count as "·"-separated text (e.g. "Chicago, IL ·
+  // 2 weeks ago · 47 applicants"). Location is always the first segment.
+  panelLocation: '.job-details-jobs-unified-top-card__primary-description-container, .job-details-jobs-unified-top-card__tertiary-description-container',
   panelApply: 'a[aria-label*="Apply"]:not([aria-label*="Easy"]):not([aria-label*="continue"])',
   panelJdContent: '#job-details, .jobs-description__container, .jobs-box__html-content',
   panelMoreButton: '.jobs-description__footer-button button, button.jobs-description__footer-button',
@@ -387,7 +391,17 @@ async function extractDetailFromPanel(page) {
     const jdEl = document.querySelector(sel.panelJdContent);
     const jdText = jdEl?.innerText?.trim() ?? '';
 
-    return { title, company, applicationUrl, jdText, url: window.location.href };
+    // Location is the first "·"-separated segment of the primary/tertiary
+    // description line (e.g. "Chicago, IL · 2 weeks ago · 47 applicants").
+    // If the line format changes or the element isn't found, leave this
+    // empty rather than guess — the caller marks it UNVERIFIED, not blank,
+    // so downstream evaluation doesn't silently treat missing data as
+    // "no location constraint."
+    const locationEl = document.querySelector(sel.panelLocation);
+    const locationRaw = locationEl?.textContent?.trim() ?? '';
+    const location = locationRaw ? locationRaw.split('·')[0].trim() : '';
+
+    return { title, company, applicationUrl, jdText, location, url: window.location.href };
   }, { sel: SELECTORS, noiseLabels: [...NOISE_LABELS], minLen: MIN_TITLE_LENGTH });
 }
 
@@ -450,6 +464,7 @@ function saveJd(detail) {
   const content = `---
 title: ${yamlEscape(detail.title)}
 company: ${yamlEscape(detail.company)}
+location: ${yamlEscape(detail.location || 'UNVERIFIED')}
 url: ${yamlEscape(detail.url)}
 application_url: ${yamlEscape(detail.applicationUrl || '')}
 scraped: "${today}"
@@ -524,7 +539,12 @@ async function runSearch(page, entry) {
         title: detail.title,
         url: `local:${jdFile}`,
         company: detail.company || '',
-        location: '',
+        // Explicit sentinel, not '' — a blank location has historically been
+        // read downstream as "no location constraint" and silently treated
+        // as neutral. LinkedIn's panel markup changes periodically, so when
+        // extraction comes back empty, force evaluators to verify rather
+        // than assume remote/unconstrained.
+        location: detail.location || 'UNVERIFIED',
         // Stash original LinkedIn URL for downstream tooling that can use it
         _linkedin_url: detail.url,
         _application_url: detail.applicationUrl,

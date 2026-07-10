@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Updates data/pipeline.md by moving evaluated entries from "Pendientes" to "Procesadas"
+// Updates data/pipeline.md by moving evaluated entries from "Pending" to "Processed"
 // with their score, report number, and PDF flag (based on min-score=3.0 threshold).
 
 import fs from 'node:fs';
@@ -122,11 +122,11 @@ processed.sort((a, b) => {
 // 4. Build new pipeline.md
 const out = [
   '',
-  '## Pendientes',
+  '## Pending',
   '',
   ...pending,
   '',
-  '## Procesadas',
+  '## Processed',
   '',
   ...processed,
   '',
@@ -135,7 +135,7 @@ const out = [
 fs.writeFileSync(PIPELINE, out);
 
 console.log(`Pipeline updated:`);
-console.log(`  Pendientes:  ${pending.length}`);
-console.log(`  Procesadas:  ${processed.length}`);
+console.log(`  Pending:    ${pending.length}`);
+console.log(`  Processed:  ${processed.length}`);
 console.log(`  Score >= 3.0 (PDF ✅): ${processed.filter(l => l.endsWith('✅')).length}`);
 console.log(`  Score <  3.0 (PDF ❌): ${processed.filter(l => l.endsWith('❌')).length}`);

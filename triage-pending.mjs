@@ -3,7 +3,7 @@
 /**
  * triage-pending.mjs — Heuristic ranking of pending pipeline.md entries.
  *
- * Reads `## Pendientes` from data/pipeline.md, scores each entry on cheap
+ * Reads `## Pending` from data/pipeline.md, scores each entry on cheap
  * signals (title patterns, company name recognition, URL slug hints), and
  * groups into 4 tiers:
  *
@@ -233,9 +233,27 @@ function scoreEntry(entry, recencyBonus) {
 
 // ── Pipeline parser ─────────────────────────────────────────────────
 
+// Locate a header line by exact match (accepts the current English header
+// and the legacy Spanish spelling) rather than a raw substring search — old
+// "## Filtered (mid-...)" blocks contain restore-instruction comments that
+// literally say "move lines back to ## Pending" and would otherwise cause a
+// false match via plain indexOf.
+function findHeaderIndex(text, re) {
+  const lines = text.split('\n');
+  let offset = 0;
+  for (const line of lines) {
+    if (re.test(line.trim())) return offset;
+    offset += line.length + 1;
+  }
+  return -1;
+}
+
+const PENDING_HEADER_RE = /^##\s+(Pending|Pendientes)\s*$/;
+const PROCESSED_HEADER_RE = /^##\s+(Processed|Procesadas)\s*$/;
+
 function parsePending(text) {
-  // Find Pendientes section
-  const startIdx = text.indexOf('## Pendientes');
+  // Find Pending section
+  const startIdx = findHeaderIndex(text, PENDING_HEADER_RE);
   if (startIdx === -1) return [];
   const endIdx = text.indexOf('\n## ', startIdx + 1);
   const block = endIdx === -1 ? text.slice(startIdx) : text.slice(startIdx, endIdx);
@@ -259,8 +277,8 @@ function parsePending(text) {
 }
 
 function parseProcessedUrls(text) {
-  // Pull all URLs that appear in `## Procesadas` (already-evaluated)
-  const startIdx = text.indexOf('## Procesadas');
+  // Pull all URLs that appear in `## Processed` (already-evaluated)
+  const startIdx = findHeaderIndex(text, PROCESSED_HEADER_RE);
   if (startIdx === -1) return new Set();
   const block = text.slice(startIdx);
   const urls = new Set();
@@ -281,7 +299,7 @@ const text = readFileSync(PIPELINE_PATH, 'utf-8');
 const allPending = parsePending(text);
 const processedUrls = parseProcessedUrls(text);
 
-// Filter: skip entries already evaluated (URL appears in Procesadas)
+// Filter: skip entries already evaluated (URL appears in Processed)
 const pending = allPending.filter(e => !processedUrls.has(e.url));
 const skippedAsProcessed = allPending.length - pending.length;
 
