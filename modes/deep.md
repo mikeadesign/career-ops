@@ -7,8 +7,6 @@ Generate a structured prompt for Perplexity/Claude/ChatGPT with 6 axes:
 
 Context: I am evaluating a candidacy for [role] at [company]. I need actionable information for the interview.
 
-**Output format:** Respond in plain, raw Markdown: `##`/`###` headings, `-` lists, and Markdown tables where useful. For each source include the full URL as a Markdown link `[title](https://…)`. Do NOT use artifacts, "internal links", citation widgets, or any element exclusive to the web interface — the result must be copy-pasteable as Markdown text into any editor.
-
 ### 1. AI Strategy
 - What products/features use AI/ML?
 - What is their AI stack? (models, infrastructure, tools)
@@ -46,8 +44,4 @@ Given my profile (read from cv.md and profile.yml for specific experience):
 - What story should I tell in the interview?
 ```
 
-Personalize each section with the specific context of the job being evaluated,
-in the language resolved in the **Language** section above (NOT always English).
-**Always keep the "Output format" instruction (raw Markdown)** when translating
-or personalizing — it is what prevents Claude web from returning artifacts or
-internal links instead of copy-pasteable Markdown.
+Personalize each section with the specific context of the job being evaluated.

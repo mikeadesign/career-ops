@@ -1,17 +1,17 @@
 package screens
 
 import (
-	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
-	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/lipgloss/table"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/santifer/career-ops/dashboard/internal/data"
 	"github.com/santifer/career-ops/dashboard/internal/model"
 	"github.com/santifer/career-ops/dashboard/internal/theme"
 )
@@ -19,117 +19,81 @@ import (
 // ViewerClosedMsg is emitted when the viewer is dismissed.
 type ViewerClosedMsg struct{}
 
-// ViewerOpenTasksMsg is emitted when the user wants to jump from the viewer
-// to the tasks list, focused on the first task for the current application.
-type ViewerOpenTasksMsg struct {
-	AppNumber int
+// ViewerOpenCoverLetterMsg is emitted when the user requests to open the cover letter PDF.
+type ViewerOpenCoverLetterMsg struct{ Path string }
+
+// ViewerUpdateStatusMsg is emitted when a status update is requested from the viewer.
+type ViewerUpdateStatusMsg struct {
+	App       model.CareerApplication
+	NewStatus string
 }
 
 // ViewerModel implements an integrated file viewer screen.
-//
-// `lines` is the raw file content split on newlines; `renderedLines` is the
-// width-aware rendered output (markdown tables, code blocks, wrapped
-// paragraphs) produced by renderAll(). Re-rendered on Resize.
 type ViewerModel struct {
-	lines         []string
-	renderedLines []string
-	title         string
-	scrollOffset  int
-	width         int
-	height        int
-	theme         theme.Theme
-	app           model.CareerApplication
-	careerOpsPath string
-	hasApp        bool
-	statusPicker  bool
-	statusCursor  int
-	// rawReport is the report file content exactly as read from disk — before
-	// the tasks header is prepended to `lines`. It (and the deep-research
-	// prompt extracted from it) back the clipboard-copy action so a yank
-	// reproduces the report, not the rendered task table.
-	rawReport  string
-	deepPrompt string
-	// flash is a transient status line shown in the footer (e.g. the result of
-	// a clipboard copy). Cleared on the next keypress.
-	flash string
-	// Add-task prompt sub-state — shared helper used by both pipeline and
-	// viewer so the keystroke + flow is identical between the two.
-	addTask addTaskPrompt
+	lines           []string
+	renderedLines   []string
+	title           string
+	scrollOffset    int
+	width           int
+	height          int
+	theme           theme.Theme
+	app             model.CareerApplication
+	careerOpsPath   string
+	coverLetterPath string
+	statusPicker    bool
+	statusCursor    int
 }
 
 // NewViewerModel creates a new file viewer for the given path.
-// If app.ReportPath is non-empty, the viewer enables in-place status changes.
-// tasks is the list of tasks linked to this application (filtered by App#);
-// the viewer renders them as a markdown table prepended to the report body so
-// the user can review all open work on this application at a glance.
-func NewViewerModel(t theme.Theme, path, title string, width, height int, app model.CareerApplication, careerOpsPath string, tasks []model.Task) ViewerModel {
+func NewViewerModel(t theme.Theme, careerOpsPath, path, title string, width, height int, app model.CareerApplication) ViewerModel {
 	content, err := os.ReadFile(path)
 	if err != nil {
 		content = []byte("Error reading file: " + err.Error())
 	}
 
-	raw := string(content)
 	var lines []string
 	if len(content) > 0 {
-		lines = strings.Split(raw, "\n")
-	}
-	if len(tasks) > 0 {
-		lines = append(buildTasksHeader(tasks), lines...)
+		lines = strings.Split(string(content), "\n")
 	}
 
 	m := ViewerModel{
-		lines:         lines,
-		title:         title,
-		width:         width,
-		height:        height,
-		theme:         t,
-		app:           app,
-		careerOpsPath: careerOpsPath,
-		hasApp:        app.ReportPath != "" || app.Company != "",
-		rawReport:     raw,
-		deepPrompt:    extractDeepPrompt(raw),
+		lines:           lines,
+		title:           title,
+		width:           width,
+		height:          height,
+		theme:           t,
+		app:             app,
+		careerOpsPath:   careerOpsPath,
+		coverLetterPath: parseCoverLetterPath(lines, careerOpsPath),
 	}
 	m.rebuildRender()
 	return m
 }
 
-// buildTasksHeader produces the markdown lines for the "Tasks for this
-// application" panel rendered at the top of the report viewer. The existing
-// renderTableBlock turns the table into a properly formatted box.
-func buildTasksHeader(tasks []model.Task) []string {
-	pending, done, skipped := 0, 0, 0
-	for _, t := range tasks {
-		switch t.Status {
-		case "pending":
-			pending++
-		case "done":
-			done++
-		case "skipped":
-			skipped++
+// parseCoverLetterPath scans the report lines for a "PDF generated: output/..." line
+// inside a "## Cover Letter Draft" section and returns the relative path if the file exists.
+func parseCoverLetterPath(lines []string, careerOpsPath string) string {
+	inCoverSection := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "## Cover Letter Draft") {
+			inCoverSection = true
+			continue
+		}
+		if inCoverSection && strings.HasPrefix(trimmed, "## ") {
+			break
+		}
+		if inCoverSection {
+			if m := reCoverLetterPDF.FindStringSubmatch(line); m != nil {
+				relPath := m[1]
+				abs := filepath.Join(careerOpsPath, filepath.FromSlash(relPath))
+				if _, err := os.Stat(abs); err == nil {
+					return relPath
+				}
+			}
 		}
 	}
-	lines := []string{
-		"## Tasks for this application",
-		"",
-		fmt.Sprintf("**Summary:** %d pending · %d done · %d skipped", pending, done, skipped),
-		"",
-		"| # | Status | Type | Title | Due | Completed |",
-		"|---|--------|------|-------|-----|-----------|",
-	}
-	for _, t := range tasks {
-		due := t.Due
-		if due == "" {
-			due = "-"
-		}
-		completed := t.Completed
-		if completed == "" {
-			completed = "-"
-		}
-		lines = append(lines, fmt.Sprintf("| %d | %s | %s | %s | %s | %s |",
-			t.Number, t.Status, t.Type, t.Title, due, completed))
-	}
-	lines = append(lines, "", "---", "")
-	return lines
+	return ""
 }
 
 // rebuildRender recomputes renderedLines from raw lines using the current width.
@@ -163,74 +127,26 @@ func (m *ViewerModel) Resize(width, height int) {
 
 func (m ViewerModel) Update(msg tea.Msg) (ViewerModel, tea.Cmd) {
 	switch msg := msg.(type) {
-	case viewerCopyResultMsg:
-		switch {
-		case msg.err != nil:
-			m.flash = "Copy failed: " + msg.err.Error()
-		case msg.withPrompt:
-			m.flash = "Copied deep prompt + evaluation to clipboard"
-		default:
-			m.flash = "Copied evaluation to clipboard (no deep prompt in report)"
-		}
-		return m, nil
-
 	case tea.KeyMsg:
-		// Any keystroke dismisses a lingering flash so it never sticks around
-		// past the action that produced it.
-		m.flash = ""
 		if m.statusPicker {
 			return m.handleStatusPicker(msg)
-		}
-		if m.addTask.active() {
-			return m.handleAddTaskInput(msg)
 		}
 		switch msg.String() {
 		case "q", "esc":
 			return m, func() tea.Msg { return ViewerClosedMsg{} }
 
-		case "y":
-			// Yank the report to the clipboard. When the report embeds a
-			// deep-research prompt (score cleared the threshold at eval time),
-			// the prompt leads and the evaluation follows as context.
-			payload, withPrompt := m.clipboardPayload()
-			if strings.TrimSpace(payload) == "" {
-				m.flash = "Nothing to copy"
-				return m, nil
-			}
-			return m, func() tea.Msg {
-				return viewerCopyResultMsg{withPrompt: withPrompt, err: copyToClipboard(payload)}
-			}
-
 		case "c":
-			if m.hasApp {
-				m.statusPicker = true
-				m.statusCursor = 0
-			}
-
-		case "n":
-			// Same shortcut as the pipeline view — open the shared
-			// add-task prompt for the application currently displayed
-			// in the viewer. Requires a real App# so the resulting
-			// task can be linked back.
-			if m.app.Number > 0 {
-				m.addTask.open()
-			}
-
-		case "t":
-			if m.app.Number > 0 {
-				appNum := m.app.Number
-				return m, func() tea.Msg {
-					return ViewerOpenTasksMsg{AppNumber: appNum}
+			m.statusPicker = true
+			m.statusCursor = 0
+			currentNorm := data.NormalizeStatus(m.app.Status)
+			for idx, opt := range statusOptions {
+				if data.NormalizeStatus(opt) == currentNorm {
+					m.statusCursor = idx
+					break
 				}
 			}
-
-		case "o":
-			if m.app.JobURL != "" {
-				url := m.app.JobURL
-				return m, func() tea.Msg {
-					return PipelineOpenURLMsg{URL: url}
-				}
-			}
+			m.clampScrollOffset()
+			return m, nil
 
 		case "down", "j":
 			maxScroll := len(m.renderedLines) - m.bodyHeight()
@@ -273,6 +189,12 @@ func (m ViewerModel) Update(msg tea.Msg) (ViewerModel, tea.Cmd) {
 				maxScroll = 0
 			}
 			m.scrollOffset = maxScroll
+
+		case "L":
+			if m.coverLetterPath != "" {
+				fullPath := filepath.Join(m.careerOpsPath, filepath.FromSlash(m.coverLetterPath))
+				return m, func() tea.Msg { return ViewerOpenCoverLetterMsg{Path: fullPath} }
+			}
 		}
 
 	case tea.WindowSizeMsg:
@@ -284,90 +206,11 @@ func (m ViewerModel) Update(msg tea.Msg) (ViewerModel, tea.Cmd) {
 	return m, nil
 }
 
-func (m ViewerModel) handleStatusPicker(msg tea.KeyMsg) (ViewerModel, tea.Cmd) {
-	switch msg.String() {
-	case "esc", "q":
-		m.statusPicker = false
-		return m, nil
-
-	case "down", "j":
-		m.statusCursor++
-		if m.statusCursor >= len(statusOptions) {
-			m.statusCursor = len(statusOptions) - 1
-		}
-
-	case "up", "k":
-		m.statusCursor--
-		if m.statusCursor < 0 {
-			m.statusCursor = 0
-		}
-
-	case "enter":
-		m.statusPicker = false
-		newStatus := statusOptions[m.statusCursor].label
-		app := m.app
-		path := m.careerOpsPath
-		return m, func() tea.Msg {
-			return PipelineUpdateStatusMsg{
-				CareerOpsPath: path,
-				App:           app,
-				NewStatus:     newStatus,
-			}
-		}
-
-	default:
-		key := strings.ToLower(msg.String())
-		if len(key) == 1 {
-			for i, opt := range statusOptions {
-				if opt.shortcut == key {
-					m.statusCursor = i
-					m.statusPicker = false
-					newStatus := opt.label
-					app := m.app
-					path := m.careerOpsPath
-					return m, func() tea.Msg {
-						return PipelineUpdateStatusMsg{
-							CareerOpsPath: path,
-							App:           app,
-							NewStatus:     newStatus,
-						}
-					}
-				}
-			}
-		}
-	}
-	return m, nil
-}
-
-// handleAddTaskInput routes a key into the shared add-task prompt. On submit
-// (Enter at stage 2), resolves the offset and emits PipelineAddTaskMsg —
-// same message the pipeline view uses so main.go has one handler for both
-// entry points.
-func (m ViewerModel) handleAddTaskInput(msg tea.KeyMsg) (ViewerModel, tea.Cmd) {
-	if !m.addTask.handleKey(msg) {
-		return m, nil
-	}
-	app := m.app
-	title := m.addTask.Title()
-	due := m.addTask.ResolvedDue()
-	m.addTask.close()
-	return m, func() tea.Msg {
-		return PipelineAddTaskMsg{App: app, Title: title, Due: due}
-	}
-}
-
-// overlayAddTaskPrompt delegates to the shared renderer with the viewer's
-// application as the target label.
-func (m ViewerModel) overlayAddTaskPrompt(body string) string {
-	target := fmt.Sprintf("#%d %s", m.app.Number, m.app.Company)
-	if m.app.Number == 0 {
-		target = m.app.Company
-	}
-	return m.addTask.render(body, m.theme, target)
-}
-
 func (m ViewerModel) bodyHeight() int {
 	h := m.height - 4 // header + footer + padding
+	if m.statusPicker {
+		h -= (len(statusOptions) + 1)
+	}
 	if h < 3 {
 		h = 3
 	}
@@ -377,45 +220,12 @@ func (m ViewerModel) bodyHeight() int {
 func (m ViewerModel) View() string {
 	header := m.renderHeader()
 	body := m.renderBody()
+	if m.statusPicker {
+		body = m.overlayStatusPicker(body)
+	}
 	footer := m.renderFooter()
 
-	view := lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
-	if m.statusPicker {
-		view = m.overlayStatusPicker(view)
-	}
-	if m.addTask.active() {
-		view = m.overlayAddTaskPrompt(view)
-	}
-	return view
-}
-
-func (m ViewerModel) overlayStatusPicker(body string) string {
-	bodyLines := strings.Split(body, "\n")
-
-	pickerWidth := 30
-	padStyle := lipgloss.NewStyle().Padding(0, 2)
-	borderStyle := lipgloss.NewStyle().
-		Foreground(m.theme.Blue).
-		Bold(true)
-
-	var picker []string
-	picker = append(picker, padStyle.Render(borderStyle.Render("Change status:")))
-
-	for i, opt := range statusOptions {
-		style := lipgloss.NewStyle().Foreground(m.theme.Text).Width(pickerWidth)
-		if i == m.statusCursor {
-			style = style.Background(m.theme.Overlay).Bold(true)
-		}
-		prefix := "  "
-		if i == m.statusCursor {
-			prefix = "> "
-		}
-		label := fmt.Sprintf("%s (%s)", opt.label, strings.ToUpper(opt.shortcut))
-		picker = append(picker, padStyle.Render(style.Render(prefix+label)))
-	}
-
-	bodyLines = append(bodyLines, picker...)
-	return strings.Join(bodyLines, "\n")
+	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
 }
 
 func (m ViewerModel) renderHeader() string {
@@ -427,16 +237,6 @@ func (m ViewerModel) renderHeader() string {
 		Padding(0, 2)
 
 	title := lipgloss.NewStyle().Bold(true).Foreground(m.theme.Blue).Render(m.title)
-
-	// Prefix the header with the application ID (the tracker #) so the user can
-	// always see which application this report belongs to. Only shown when the
-	// viewer is backed by a real application row.
-	left := title
-	if m.app.Number > 0 {
-		idBadge := lipgloss.NewStyle().Bold(true).Foreground(m.theme.Mauve).
-			Render(fmt.Sprintf("#%d", m.app.Number))
-		left = idBadge + "  " + title
-	}
 
 	right := lipgloss.NewStyle().Foreground(m.theme.Subtext)
 	scroll := right.Render(func() string {
@@ -460,12 +260,12 @@ func (m ViewerModel) renderHeader() string {
 		}()
 	}())
 
-	gap := m.width - lipgloss.Width(left) - lipgloss.Width(scroll) - 4
+	gap := m.width - lipgloss.Width(m.title) - lipgloss.Width(scroll) - 4
 	if gap < 1 {
 		gap = 1
 	}
 
-	return style.Render(left + strings.Repeat(" ", gap) + scroll)
+	return style.Render(title + strings.Repeat(" ", gap) + scroll)
 }
 
 func (m ViewerModel) renderBody() string {
@@ -691,11 +491,13 @@ func (m ViewerModel) renderTableBlock(lines []string) []string {
 }
 
 var (
-	reBold       = regexp.MustCompile(`\*\*([^*]+)\*\*`)
-	reLink       = regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`)
-	reBareURL    = regexp.MustCompile(`https?://\S*[^\s\)\]\.,;:!?]`)
-	reInlineCode = regexp.MustCompile("`([^`]+)`")
-	reListNumber = regexp.MustCompile(`^(\s*\d+\.\s+)(.*)$`)
+	reBold           = regexp.MustCompile(`\*\*([^*]+)\*\*`)
+	reLink           = regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`)
+	reBareURL        = regexp.MustCompile(`https?://\S*[^\s\)\]\.,;:!?]`)
+	reInlineCode     = regexp.MustCompile("`([^`]+)`")
+	reListNumber     = regexp.MustCompile(`^(\s*\d+\.\s+)(.*)$`)
+	reCoverLetterPDF = regexp.MustCompile(`PDF generated:\s*(output/[^\s]+\.pdf)`)
+	reRelPDFPath     = regexp.MustCompile(`output/cv-[^\s\)\]\.,;:!?"']+\.pdf`)
 )
 
 func isHeadingLine(line string) bool {
@@ -744,7 +546,7 @@ func (m ViewerModel) renderInlineElementsAs(line string, baseColor lipgloss.Colo
 	var b strings.Builder
 	rest := line
 	for rest != "" {
-		match := findInlineMatch(rest, codeStyle, boldStyle, linkStyle)
+		match := findInlineMatch(rest, codeStyle, boldStyle, linkStyle, m.careerOpsPath)
 		if match == nil {
 			b.WriteString(baseStyle.Render(rest))
 			break
@@ -763,7 +565,7 @@ type inlineMatch struct {
 	rendered   string
 }
 
-func findInlineMatch(s string, codeStyle, boldStyle, linkStyle lipgloss.Style) *inlineMatch {
+func findInlineMatch(s string, codeStyle, boldStyle, linkStyle lipgloss.Style, careerOpsPath string) *inlineMatch {
 	var best *inlineMatch
 	consider := func(loc []int, rendered func() string) {
 		if loc == nil || (best != nil && loc[0] >= best.start) {
@@ -789,6 +591,26 @@ func findInlineMatch(s string, codeStyle, boldStyle, linkStyle lipgloss.Style) *
 	}
 	if loc := reBareURL.FindStringIndex(s); loc != nil {
 		consider(loc, func() string { return linkStyle.Render(s[loc[0]:loc[1]]) })
+	}
+	if loc := reRelPDFPath.FindStringIndex(s); loc != nil {
+		consider(loc, func() string {
+			relPath := s[loc[0]:loc[1]]
+			styled := linkStyle.Render(relPath)
+			if careerOpsPath == "" {
+				return styled
+			}
+			joined := filepath.Join(careerOpsPath, filepath.FromSlash(relPath))
+			absPath, err := filepath.Abs(joined)
+			if err != nil {
+				return styled
+			}
+			forward := filepath.ToSlash(absPath)
+			if !strings.HasPrefix(forward, "/") {
+				forward = "/" + forward // Windows: C:/... → /C:/...
+			}
+			// OSC 8 hyperlink: ESC ] 8 ; ; URL BEL text ESC ] 8 ; ; BEL
+			return "\x1b]8;;" + "file://" + forward + "\x07" + styled + "\x1b]8;;\x07"
+		})
 	}
 	return best
 }
@@ -892,71 +714,88 @@ func (m ViewerModel) renderFooter() string {
 	keyStyle := lipgloss.NewStyle().Bold(true).Foreground(m.theme.Text)
 	descStyle := lipgloss.NewStyle().Foreground(m.theme.Subtext)
 
-	// A pending flash (e.g. clipboard-copy result) takes over the footer until
-	// the next keystroke clears it.
-	if m.flash != "" {
-		flashStyle := lipgloss.NewStyle().Bold(true).Foreground(m.theme.Green)
-		if strings.HasPrefix(m.flash, "Copy failed") {
-			flashStyle = flashStyle.Foreground(m.theme.Red)
-		}
-		return style.Render(flashStyle.Render(m.flash))
-	}
-
-	// While the add-task prompt is open, hide the navigation hints and
-	// show input-mode hints instead so the user knows what's reachable.
-	if m.addTask.active() {
+	if m.statusPicker {
 		return style.Render(
-			keyStyle.Render("type") + descStyle.Render(" input  ") +
-				keyStyle.Render("↑↓") + descStyle.Render(" ±day  ") +
-				keyStyle.Render("Enter") + descStyle.Render(" next/save  ") +
-				keyStyle.Render("Esc") + descStyle.Render(" cancel"))
+			keyStyle.Render("↑/↓/j/k") + descStyle.Render(" select  ") +
+				keyStyle.Render("Enter") + descStyle.Render(" confirm  ") +
+				keyStyle.Render("Esc/q") + descStyle.Render(" cancel"))
 	}
 
-	parts := keyStyle.Render("↑↓") + descStyle.Render(" scroll  ") +
+	footer := keyStyle.Render("↑↓") + descStyle.Render(" scroll  ") +
 		keyStyle.Render("PgUp/Dn") + descStyle.Render(" page  ") +
-		keyStyle.Render("g/G") + descStyle.Render(" top/end  ")
-	if m.hasApp {
-		parts += keyStyle.Render("c") + descStyle.Render(" change status  ")
-	}
-	if m.app.JobURL != "" {
-		parts += keyStyle.Render("o") + descStyle.Render(" open URL  ")
-	}
-	if m.app.Number > 0 {
-		parts += keyStyle.Render("n") + descStyle.Render(" new task  ") +
-			keyStyle.Render("t") + descStyle.Render(" tasks  ")
-	}
-	parts += keyStyle.Render("y") + descStyle.Render(" copy  ") +
+		keyStyle.Render("g/G") + descStyle.Render(" top/end  ") +
+		keyStyle.Render("c") + descStyle.Render(" status  ") +
 		keyStyle.Render("Esc") + descStyle.Render(" back")
-	return style.Render(parts)
+
+	if m.coverLetterPath != "" {
+		footer += "  " + keyStyle.Render("L") + descStyle.Render(" cover letter")
+	}
+
+	return style.Render(footer)
 }
 
-// wordWrap performs greedy word-wrap: pack as many whitespace-separated
-// tokens as fit, then start a new line. A single word longer than width is
-// kept on its own line rather than mid-word split.
-func wordWrap(text string, width int) []string {
-	words := strings.Fields(text)
-	if len(words) == 0 {
-		return []string{text}
-	}
-	var lines []string
-	var current strings.Builder
-	for _, w := range words {
-		if current.Len() == 0 {
-			current.WriteString(w)
-			continue
+func (m ViewerModel) handleStatusPicker(msg tea.KeyMsg) (ViewerModel, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "q":
+		m.statusPicker = false
+		m.clampScrollOffset()
+		return m, nil
+
+	case "down", "j":
+		m.statusCursor++
+		if m.statusCursor >= len(statusOptions) {
+			m.statusCursor = len(statusOptions) - 1
 		}
-		runeLen := utf8.RuneCountInString(current.String()) + 1 + utf8.RuneCountInString(w)
-		if runeLen <= width {
-			current.WriteByte(' ')
-			current.WriteString(w)
-		} else {
-			lines = append(lines, current.String())
-			current.Reset()
-			current.WriteString(w)
+
+	case "up", "k":
+		m.statusCursor--
+		if m.statusCursor < 0 {
+			m.statusCursor = 0
+		}
+
+	case "enter":
+		m.statusPicker = false
+		m.clampScrollOffset()
+		newStatus := statusOptions[m.statusCursor]
+		return m, func() tea.Msg {
+			return ViewerUpdateStatusMsg{
+				App:       m.app,
+				NewStatus: newStatus,
+			}
 		}
 	}
-	if current.Len() > 0 {
-		lines = append(lines, current.String())
+	return m, nil
+}
+
+func (m ViewerModel) overlayStatusPicker(body string) string {
+	bodyLines := strings.Split(body, "\n")
+
+	pickerWidth := 30
+	padStyle := lipgloss.NewStyle().Padding(0, 2)
+	borderStyle := lipgloss.NewStyle().
+		Foreground(m.theme.Blue).
+		Bold(true)
+
+	var picker []string
+	picker = append(picker, padStyle.Render(borderStyle.Render("Change status:")))
+
+	for i, opt := range statusOptions {
+		style := lipgloss.NewStyle().Foreground(m.theme.Text).Width(pickerWidth)
+		if i == m.statusCursor {
+			style = style.Background(m.theme.Overlay).Bold(true)
+		}
+		prefix := "  "
+		if i == m.statusCursor {
+			prefix = "> "
+		}
+		picker = append(picker, padStyle.Render(style.Render(prefix+opt)))
 	}
-	return lines
+
+	bodyLines = append(bodyLines, picker...)
+	return strings.Join(bodyLines, "\n")
+}
+
+// UpdateAppStatus updates the status of the current application inside the viewer model.
+func (m *ViewerModel) UpdateAppStatus(newStatus string) {
+	m.app.Status = newStatus
 }
