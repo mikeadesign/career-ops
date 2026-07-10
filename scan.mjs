@@ -1009,8 +1009,15 @@ Paste job URLs below as \`- [ ] {url}\` then run \`/career-ops pipeline\`.
 
 // Current section names (English). Legacy Spanish names are checked as fallback
 // so existing pipeline.md files created before this change keep working.
-const PENDING_MARKERS = ['## Pending', '## Pendientes'];
-const PROCESSED_MARKERS = ['## Processed', '## Procesadas'];
+//
+// Matched as a line-exact header, not a raw substring search — old
+// "## Filtered (mid-...)" archive blocks contain restore-instruction
+// comments that literally say "move lines back to ## Pending", and a
+// substring match on that text previously caused new offers to be inserted
+// into the wrong (archived) section instead of the real Pending section.
+const isPendingHeader = (line) => /^##\s+(Pending|Pendientes)\s*$/.test(line.trim());
+const isProcessedHeader = (line) => /^##\s+(Processed|Procesadas)\s*$/.test(line.trim());
+const isAnyHeader = (line) => line.startsWith('## ');
 
 export function appendToPipeline(offers) {
   if (offers.length === 0) return;
@@ -1020,31 +1027,36 @@ export function appendToPipeline(offers) {
     writeFileSync(PIPELINE_PATH, PIPELINE_SKELETON, 'utf-8');
   }
 
-  let text = readFileSync(PIPELINE_PATH, 'utf-8');
+  const text = readFileSync(PIPELINE_PATH, 'utf-8');
+  const lines = text.split('\n');
 
-  const marker = PENDING_MARKERS.find(m => text.includes(m)) ?? null;
-  const idx = marker !== null ? text.indexOf(marker) : -1;
-
-  if (idx === -1) {
-    // No Pending section found — insert one before Processed (or at end)
-    const procIdx = PROCESSED_MARKERS.reduce((found, m) => {
-      const i = text.indexOf(m);
-      return (found === -1 || (i !== -1 && i < found)) ? i : found;
-    }, -1);
-    const insertAt = procIdx === -1 ? text.length : procIdx;
-    const block = `\n## Pending\n\n` + offers.map(formatPipelineOffer).join('\n') + '\n\n';
-    text = text.slice(0, insertAt) + block + text.slice(insertAt);
-  } else {
-    // Find the end of existing Pending content (next ## or end)
-    const afterMarker = idx + marker.length;
-    const nextSection = text.indexOf('\n## ', afterMarker);
-    const insertAt = nextSection === -1 ? text.length : nextSection;
-
-    const block = '\n' + offers.map(formatPipelineOffer).join('\n') + '\n';
-    text = text.slice(0, insertAt) + block + text.slice(insertAt);
+  let pStart = -1;
+  let insertLineIdx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (isPendingHeader(lines[i])) {
+      pStart = i;
+      insertLineIdx = lines.length;
+      for (let j = i + 1; j < lines.length; j++) {
+        if (isAnyHeader(lines[j])) { insertLineIdx = j; break; }
+      }
+      break;
+    }
   }
 
-  writeFileSync(PIPELINE_PATH, text, 'utf-8');
+  const newLines = offers.map(formatPipelineOffer);
+
+  if (pStart === -1) {
+    // No Pending section found — insert one before Processed (or at end).
+    let procIdx = lines.length;
+    for (let i = 0; i < lines.length; i++) {
+      if (isProcessedHeader(lines[i])) { procIdx = i; break; }
+    }
+    lines.splice(procIdx, 0, '## Pending', '', ...newLines, '');
+  } else {
+    lines.splice(insertLineIdx, 0, ...newLines);
+  }
+
+  writeFileSync(PIPELINE_PATH, lines.join('\n'), 'utf-8');
 }
 
 export function appendToScanHistory(offers, date, status = 'added') {

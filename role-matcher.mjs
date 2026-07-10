@@ -48,7 +48,7 @@ export const SHORT_SPECIALTY = new Set([
 // Generic role-level descriptors. Two titles whose only overlap is in this set
 // are not the same opening; they are merely written at the same role altitude.
 export const BASELINE_TOKENS = new Set([
-  'software', 'engineer', 'developer', 'manager', 'architect',
+  'software', 'engineer', 'engineering', 'developer', 'manager', 'architect',
   'analyst', 'designer', 'consultant', 'specialist',
   'platform', 'systems', 'services',
   'backend', 'frontend', 'full', 'stack', 'fullstack',
