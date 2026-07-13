@@ -267,7 +267,7 @@ function unwrapRedirect(href) {
     // `data:` URL must never end up in JD frontmatter even when it doesn't
     // go through the redirect-unwrap path.
     if (u.protocol !== 'http:' && u.protocol !== 'https:') return '';
-    if (!u.hostname.includes('linkedin.com')) return u.toString();
+    if (u.hostname !== 'linkedin.com' && !u.hostname.endsWith('.linkedin.com')) return u.toString();
     if (!u.pathname.includes('/safety/go')) return u.toString();
     const nested = u.searchParams.get('url');
     if (!nested) return u.toString();

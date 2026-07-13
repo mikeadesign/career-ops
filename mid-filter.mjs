@@ -255,15 +255,19 @@ function stripFrontmatter(s) {
 
 function htmlToText(html) {
   return html
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
+    .replace(/<script[\s\S]*?<\/script\s*>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style\s*>/gi, ' ')
+    .replace(/<noscript[\s\S]*?<\/noscript\s*>/gi, ' ')
     .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(parseInt(n, 10)))
+    // Single-pass entity decode so a literal "&amp;lt;" (double-encoded input)
+    // can't be unescaped twice into a live-looking "<" across chained replaces.
+    .replace(/&(nbsp|amp|lt|gt|#\d+);/g, (_, ent) => {
+      if (ent === 'nbsp') return ' ';
+      if (ent === 'amp') return '&';
+      if (ent === 'lt') return '<';
+      if (ent === 'gt') return '>';
+      return String.fromCharCode(parseInt(ent.slice(1), 10));
+    })
     .replace(/\s+/g, ' ')
     .trim();
 }

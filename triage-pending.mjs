@@ -211,7 +211,14 @@ function scoreEntry(entry, recencyBonus) {
   }
 
   // URL slug hint
-  if (url.includes('builtin.com')) {
+  const urlHostname = (() => {
+    try {
+      return new URL(url).hostname;
+    } catch {
+      return '';
+    }
+  })();
+  if (urlHostname === 'builtin.com' || urlHostname.endsWith('.builtin.com')) {
     if (/-ai[-/]|\/ai-|ai-engineering/.test(url)) {
       score += 3;
       breakdown.push(`+3 AI in URL`);

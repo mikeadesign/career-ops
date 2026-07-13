@@ -115,6 +115,15 @@ function resolveAllowedExecutable(cmd) {
 export function run(cmd, args = [], opts = {}) {
   const exe = resolveAllowedExecutable(cmd);
   try {
+    // `args`/`opts.cwd` are always literals or repo-relative paths written by
+    // this test suite's own source — never derived from a scanned job posting,
+    // network response, or other untrusted input the harness processes. There
+    // is no shell here (execFileSync + argv, no string command), so this isn't
+    // a command-injection sink; CodeQL's uncontrolled-command-line/shell-env
+    // queries flag it structurally because `run()`'s signature accepts
+    // caller-supplied args, not because any call site here is attacker-reachable.
+    // codeql[js/uncontrolled-command-line]
+    // codeql[js/shell-command-injection-from-environment]
     return execFileSync(exe, args, { cwd: ROOT, encoding: 'utf-8', timeout: 30000, ...opts }).trim();
   } catch (e) {
     return null;
