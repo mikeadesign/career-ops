@@ -122,9 +122,7 @@ export function run(cmd, args = [], opts = {}) {
     // a command-injection sink; CodeQL's uncontrolled-command-line/shell-env
     // queries flag it structurally because `run()`'s signature accepts
     // caller-supplied args, not because any call site here is attacker-reachable.
-    // codeql[js/uncontrolled-command-line]
-    // codeql[js/shell-command-injection-from-environment]
-    return execFileSync(exe, args, { cwd: ROOT, encoding: 'utf-8', timeout: 30000, ...opts }).trim();
+    return execFileSync(exe, args, { cwd: ROOT, encoding: 'utf-8', timeout: 30000, ...opts }).trim(); // lgtm[js/uncontrolled-command-line] lgtm[js/shell-command-injection-from-environment]
   } catch (e) {
     return null;
   }

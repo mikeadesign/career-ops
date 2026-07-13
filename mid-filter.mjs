@@ -255,9 +255,9 @@ function stripFrontmatter(s) {
 
 function htmlToText(html) {
   return html
-    .replace(/<script[\s\S]*?<\/script\s*>/gi, ' ')
-    .replace(/<style[\s\S]*?<\/style\s*>/gi, ' ')
-    .replace(/<noscript[\s\S]*?<\/noscript\s*>/gi, ' ')
+    .replace(/<script[\s\S]*?<\/script\b[^>]*>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style\b[^>]*>/gi, ' ')
+    .replace(/<noscript[\s\S]*?<\/noscript\b[^>]*>/gi, ' ')
     .replace(/<[^>]+>/g, ' ')
     // Single-pass entity decode so a literal "&amp;lt;" (double-encoded input)
     // can't be unescaped twice into a live-looking "<" across chained replaces.
