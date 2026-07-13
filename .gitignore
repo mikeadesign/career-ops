@@ -12,6 +12,8 @@ data/follow-ups.md
 data/parser-output/**/*.json
 !data/parser-output/.gitkeep
 !data/parser-output/**/.gitkeep
+data/offers/*
+!data/offers/.gitkeep
 data/cache/ats-companies/
 reports/*.md
 !reports/.gitkeep

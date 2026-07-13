@@ -47,7 +47,8 @@ fi
 cd "$(dirname "${BASH_SOURCE[0]}")" || exit 1
 
 # Guarantee node / claude / bc are on PATH even under a bare Task Scheduler shell.
-export PATH="/c/Users/magee/scoop/shims:/c/Users/magee/.local/bin:/c/Program Files/nodejs:$PATH"
+# Derived from $HOME so this isn't tied to one developer's machine/username.
+export PATH="$HOME/scoop/shims:$HOME/.local/bin:/c/Program Files/nodejs:$PATH"
 
 TS=$(date +%Y-%m-%d_%H%M%S)
 DATE=$(date +%Y-%m-%d)
