@@ -16,14 +16,17 @@ import (
 var (
 	reReportLink     = regexp.MustCompile(`\[(\d+)\]\(([^)]+)\)`)
 	reScoreValue     = regexp.MustCompile(`(\d+\.?\d*)/5`)
-	reArchetype      = regexp.MustCompile(`(?i)\*\*Arquetipo(?:\s+detectado)?\*\*\s*\|\s*(.+)`)
+	reArchetype      = regexp.MustCompile(`(?i)\*\*(?:Arquetipo|Archetype)(?:\s+(?:detectado|detected))?\*\*\s*\|\s*(.+)`)
 	reTlDr           = regexp.MustCompile(`(?i)\*\*TL;DR\*\*\s*\|\s*(.+)`)
 	reTlDrColon      = regexp.MustCompile(`(?i)\*\*TL;DR:\*\*\s*(.+)`)
 	reRemote         = regexp.MustCompile(`(?i)\*\*Remote\*\*\s*\|\s*(.+)`)
 	reComp           = regexp.MustCompile(`(?i)\*\*Comp\*\*\s*\|\s*(.+)`)
-	reArchetypeColon = regexp.MustCompile(`(?i)\*\*Arquetipo:\*\*\s*(.+)`)
+	reArchetypeColon = regexp.MustCompile(`(?i)\*\*(?:Arquetipo|Archetype):\*\*\s*(.+)`)
+	reArchetypeYAML  = regexp.MustCompile(`(?m)^archetype:\s*"?([^"\n]+)"?\s*$`)
 	reReportURL      = regexp.MustCompile(`(?m)^\*\*URL:\*\*\s*(https?://\S+)`)
 	reBatchID        = regexp.MustCompile(`(?m)^\*\*Batch ID:\*\*\s*(\d+)`)
+	reDiscardReasons = regexp.MustCompile(`(?s)discard_reasons:\s*\n((?:\s*-\s*.+?\n)+)`)
+	reDiscardItem    = regexp.MustCompile(`\s*-\s*([^\n]+)`)
 )
 
 // resolveReportPath converts a report link from the tracker into a path
@@ -63,6 +66,12 @@ func ParseApplications(careerOpsPath string) []model.CareerApplication {
 	apps := make([]model.CareerApplication, 0)
 	num := 0
 
+	// Map columns by header name rather than fixed position, so a customized or
+	// reordered tracker (e.g. an inserted Location column) does not desync the
+	// reader. Falls back to the legacy fixed layout when no header is present.
+	// This matches the Node tracker tooling, which became header-aware in #954.
+	cols := resolveTrackerColumns(lines)
+
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "# ") || strings.HasPrefix(line, "|---") || strings.HasPrefix(line, "| #") {
@@ -72,46 +81,35 @@ func ParseApplications(careerOpsPath string) []model.CareerApplication {
 			continue
 		}
 
-		// Detect delimiter: if line contains tabs, use tab-aware splitting
-		var fields []string
-		if strings.Contains(line, "\t") {
-			// Mixed format: starts with "| " then tab-separated
-			line = strings.TrimPrefix(line, "|")
-			line = strings.TrimSpace(line)
-			parts := strings.Split(line, "\t")
-			for _, p := range parts {
-				fields = append(fields, strings.TrimSpace(strings.Trim(p, "|")))
-			}
-		} else {
-			// Pure pipe format
-			line = strings.Trim(line, "|")
-			parts := strings.Split(line, "|")
-			for _, p := range parts {
-				fields = append(fields, strings.TrimSpace(p))
-			}
-		}
-
+		fields := splitTrackerRow(line)
 		if len(fields) < 8 {
 			continue
 		}
 
+		at := func(name string) string {
+			if idx, ok := cols[name]; ok && idx >= 0 && idx < len(fields) {
+				return fields[idx]
+			}
+			return ""
+		}
+
 		num++
 		trackerNumber := num
-		if parsedNumber, err := strconv.Atoi(fields[0]); err == nil {
+		if parsedNumber, err := strconv.Atoi(at("num")); err == nil {
 			trackerNumber = parsedNumber
 		}
 		app := model.CareerApplication{
 			Number:  trackerNumber,
-			Date:    fields[1],
-			Company: fields[2],
-			Role:    fields[3],
-			Status:  fields[5],
-			HasPDF:  strings.Contains(fields[6], "\u2705"),
+			Date:    at("date"),
+			Company: at("company"),
+			Role:    at("role"),
+			Status:  at("status"),
+			HasPDF:  strings.Contains(at("pdf"), "\u2705"),
 		}
 
-		// Parse score (field 4 = Score column)
-		app.ScoreRaw = fields[4]
-		if sm := reScoreValue.FindStringSubmatch(fields[4]); sm != nil {
+		// Parse score from the Score column.
+		app.ScoreRaw = at("score")
+		if sm := reScoreValue.FindStringSubmatch(at("score")); sm != nil {
 			app.Score, _ = strconv.ParseFloat(sm[1], 64)
 		}
 
@@ -121,15 +119,13 @@ func ParseApplications(careerOpsPath string) []model.CareerApplication {
 		// back to a careerOpsPath-relative path, which is what every
 		// consumer joins against. Legacy root-relative links are kept as a
 		// fallback when the resolved file does not exist.
-		if rm := reReportLink.FindStringSubmatch(fields[7]); rm != nil {
+		if rm := reReportLink.FindStringSubmatch(at("report")); rm != nil {
 			app.ReportNumber = rm[1]
 			app.ReportPath = resolveReportPath(careerOpsPath, filePath, rm[2])
 		}
 
-		// Notes (field 8 if exists)
-		if len(fields) > 8 {
-			app.Notes = fields[8]
-		}
+		// Notes column, when present.
+		app.Notes = at("notes")
 
 		// Lift location / work mode / pay / last-contact out of the notes free-text
 		deriveNoteFields(&app)
@@ -508,6 +504,8 @@ func NormalizeStatus(raw string) string {
 
 	switch {
 	// Most restrictive first — accepts both English and Spanish
+	case strings.Contains(s, "hired") || strings.Contains(s, "contratado") || strings.Contains(s, "contratada") || strings.Contains(s, "accepted") || s == "accept":
+		return "hired"
 	case strings.Contains(s, "no aplicar") || strings.Contains(s, "no_aplicar") || s == "skip" || strings.Contains(s, "geo blocker"):
 		return "skip"
 	case strings.Contains(s, "interview") || strings.Contains(s, "entrevista"):
@@ -543,6 +541,8 @@ func LoadReportSummary(careerOpsPath, reportPath string) (archetype, tldr, remot
 		archetype = cleanTableCell(m[1])
 	} else if m := reArchetypeColon.FindStringSubmatch(text); m != nil {
 		archetype = cleanTableCell(m[1])
+	} else if m := reArchetypeYAML.FindStringSubmatch(text); m != nil {
+		archetype = strings.TrimSpace(m[1])
 	}
 
 	// Try table-format TL;DR first (most reports), then colon format
@@ -568,111 +568,171 @@ func LoadReportSummary(careerOpsPath, reportPath string) (archetype, tldr, remot
 	return
 }
 
-// UpdateApplicationStatus updates the status of an application in applications.md.
-func UpdateApplicationStatus(careerOpsPath string, app model.CareerApplication, newStatus string) error {
-	filePath := filepath.Join(careerOpsPath, "applications.md")
-	content, err := os.ReadFile(filePath)
-	if err != nil {
-		filePath = filepath.Join(careerOpsPath, "data", "applications.md")
-		content, err = os.ReadFile(filePath)
-		if err != nil {
-			return err
+// splitTrackerRow splits a tracker table line into trimmed cell values, using
+// the same delimiter logic as ParseApplications: a mixed "| " + tab-separated
+// body, or a pure pipe-delimited row. Field 0 is the first real column (num), so
+// the returned indices match the legacy layout (Status is field 5).
+func splitTrackerRow(line string) []string {
+	line = strings.TrimSpace(line)
+	var fields []string
+	if strings.Contains(line, "\t") {
+		// Mixed format: starts with "| " then tab-separated.
+		line = strings.TrimPrefix(line, "|")
+		line = strings.TrimSpace(line)
+		for _, p := range strings.Split(line, "\t") {
+			fields = append(fields, strings.TrimSpace(strings.Trim(p, "|")))
+		}
+	} else {
+		// Pure pipe format.
+		line = strings.Trim(line, "|")
+		for _, p := range strings.Split(line, "|") {
+			fields = append(fields, strings.TrimSpace(p))
 		}
 	}
+	return fields
+}
 
-	lines := strings.Split(string(content), "\n")
-	found := false
+// trackerHeaderAliases maps a lowercased header cell to a canonical field name.
+// Mirrors HEADER_ALIASES in tracker-parse.mjs (including the Spanish aliases) so
+// the Go data layer tolerates the same customized layouts as the Node tracker
+// tooling after #954.
+var trackerHeaderAliases = map[string]string{
+	"#": "num", "num": "num", "date": "date",
+	"company": "company", "empresa": "company",
+	"via": "via", "role": "role", "puesto": "role",
+	"location": "location", "score": "score", "status": "status",
+	"pdf": "pdf", "report": "report", "notes": "notes",
+}
 
-	for i, line := range lines {
+// legacyTrackerColumns is the original fixed layout in splitTrackerRow field
+// space (num=0 … notes=8), used when no recognizable header row is present.
+var legacyTrackerColumns = map[string]int{
+	"num": 0, "date": 1, "company": 2, "role": 3, "score": 4,
+	"status": 5, "pdf": 6, "report": 7, "notes": 8,
+}
+
+// detectTrackerColumns scans for the table header row and maps canonical field
+// names to column indices in splitTrackerRow field space. It returns nil unless
+// the essential columns are all present, so a stray pipe line cannot yield a
+// bogus mapping and the caller falls back to legacyTrackerColumns. Mirrors
+// detectColumns in tracker-parse.mjs (#954).
+func detectTrackerColumns(lines []string) map[string]int {
+	for _, line := range lines {
 		if !strings.HasPrefix(strings.TrimSpace(line), "|") {
 			continue
 		}
-		// Match by report number
-		if app.ReportNumber != "" && strings.Contains(line, fmt.Sprintf("[%s]", app.ReportNumber)) {
-			// Replace the status field
-			lines[i] = replaceStatusInLine(line, app.Status, newStatus)
-			found = true
-			break
+		cells := splitTrackerRow(line)
+		m := make(map[string]int)
+		for i, c := range cells {
+			if name, ok := trackerHeaderAliases[strings.ToLower(c)]; ok {
+				// Unconditional assign: with a duplicated header name the LAST
+				// occurrence wins, matching detectColumns in tracker-parse.mjs
+				// (which this function mirrors) — first-wins here made the two
+				// runtimes map the same header row differently.
+				m[name] = i
+			}
 		}
-	}
-
-	if !found {
-		return fmt.Errorf("application not found: report %s", app.ReportNumber)
-	}
-
-	return os.WriteFile(filePath, []byte(strings.Join(lines, "\n")), 0644)
-}
-
-// replaceStatusInLine replaces the old status with new status in a table line.
-func replaceStatusInLine(line, oldStatus, newStatus string) string {
-	// Case-insensitive replacement of the status field
-	return strings.Replace(line, oldStatus, newStatus, 1)
-}
-
-// AppendApplicationNote appends a note fragment to the Notes column of the
-// application row identified by reportNumber. Joined to existing notes with
-// "; " (a non-pipe separator so the table parser still sees a single column).
-// No-op if the application is not found.
-func AppendApplicationNote(careerOpsPath, reportNumber, note string) error {
-	if reportNumber == "" || note == "" {
-		return nil
-	}
-	// Pipes inside a markdown table cell fracture the row when split by '|'.
-	// Replace them with the broken-bar U+00A6 so the cell stays single-column.
-	note = strings.ReplaceAll(note, "|", "¦")
-	filePath := filepath.Join(careerOpsPath, "applications.md")
-	content, err := os.ReadFile(filePath)
-	if err != nil {
-		filePath = filepath.Join(careerOpsPath, "data", "applications.md")
-		content, err = os.ReadFile(filePath)
-		if err != nil {
-			return err
+		complete := true
+		for _, k := range []string{"num", "company", "role", "score", "status"} {
+			if _, ok := m[k]; !ok {
+				complete = false
+				break
+			}
 		}
-	}
-
-	lines := strings.Split(string(content), "\n")
-	marker := fmt.Sprintf("[%s]", reportNumber)
-	for i, line := range lines {
-		if !strings.HasPrefix(strings.TrimSpace(line), "|") || !strings.Contains(line, marker) {
-			continue
+		if complete {
+			return m
 		}
-		// Update last column (Notes). Find last pipe before optional trailing pipe.
-		trimmed := strings.TrimRight(line, " \t")
-		trailingPipe := strings.HasSuffix(trimmed, "|")
-		body := trimmed
-		if trailingPipe {
-			body = strings.TrimSuffix(body, "|")
-			body = strings.TrimRight(body, " \t")
-		}
-		lastPipe := strings.LastIndex(body, "|")
-		if lastPipe < 0 {
-			return nil
-		}
-		notesField := strings.TrimSpace(body[lastPipe+1:])
-		var newNotes string
-		if notesField == "" {
-			newNotes = note
-		} else {
-			newNotes = notesField + "; " + note
-		}
-		rebuilt := body[:lastPipe+1] + " " + newNotes
-		if trailingPipe {
-			rebuilt += " |"
-		}
-		lines[i] = rebuilt
-		return os.WriteFile(filePath, []byte(strings.Join(lines, "\n")), 0644)
 	}
 	return nil
 }
 
-// FindApplicationByNumber returns the application matching tracker number, or false.
-func FindApplicationByNumber(apps []model.CareerApplication, number int) (model.CareerApplication, bool) {
-	for _, a := range apps {
-		if a.Number == number {
-			return a, true
+// resolveTrackerColumns returns the header-detected column map, falling back to
+// the legacy fixed layout when no header row is found.
+func resolveTrackerColumns(lines []string) map[string]int {
+	if m := detectTrackerColumns(lines); m != nil {
+		return m
+	}
+	return legacyTrackerColumns
+}
+
+// UpdateApplicationStatus updates the status of an application in applications.md.
+func UpdateApplicationStatus(careerOpsPath string, app model.CareerApplication, newStatus string) error {
+	return UpdateApplicationStatusAndNotes(careerOpsPath, app, newStatus, "")
+}
+
+// replaceStatusInLine rewrites only the Status cell of a tracker row, leaving
+// every other cell untouched. The previous implementation used
+// strings.Replace(line, oldStatus, …, 1), which replaces the first occurrence of
+// the status text anywhere in the row — so a status word appearing as a
+// substring of an earlier cell (e.g. Company "Applied Materials") was rewritten
+// instead of the Status cell, corrupting that cell while the status appeared to
+// stay unchanged (#1180). Matching is whole-cell (never a substring) and, as the
+// old comment claimed but the code did not, case-insensitive.
+//
+// statusField is the Status column index in splitTrackerRow field space (5 in
+// the legacy layout), resolved from the table header so a customized layout
+// (e.g. an inserted Location column) targets the right cell.
+func replaceStatusInLine(line, oldStatus, newStatus string, statusField int) string {
+	want := strings.TrimSpace(oldStatus)
+
+	// Mixed "| " + tab-separated format (mirrors ParseApplications). The body is
+	// tab-split, so cell index equals the field index.
+	if strings.Contains(line, "\t") {
+		prefix, body, found := strings.Cut(line, "|")
+		if !found {
+			return line
+		}
+		cells := strings.Split(body, "\t")
+		if idx := statusCellIndex(cells, statusField, want); idx >= 0 {
+			cells[idx] = spliceCellValue(cells[idx], newStatus)
+			return prefix + "|" + strings.Join(cells, "\t")
+		}
+		return line
+	}
+
+	// Pure pipe format. strings.Split keeps the segments between pipes; content
+	// cell N is segment N+1 (segment 0 is the empty text before the leading
+	// pipe), so the Status field maps to segment statusField+1.
+	segments := strings.Split(line, "|")
+	if idx := statusCellIndex(segments, statusField+1, want); idx >= 0 {
+		segments[idx] = spliceCellValue(segments[idx], newStatus)
+		return strings.Join(segments, "|")
+	}
+	return line
+}
+
+// statusCellIndex returns the index of the Status cell. It prefers the canonical
+// column (canonicalIdx, matching ParseApplications) and verifies it by value; if
+// that doesn't match — e.g. a custom tracker layout — it falls back to the first
+// cell that equals want exactly. Matching is whole-cell and case-insensitive,
+// never a substring, so a status word inside an earlier cell is never hit.
+// Returns -1 when nothing matches, so the caller leaves the row untouched rather
+// than corrupt a guess.
+func statusCellIndex(cells []string, canonicalIdx int, want string) int {
+	if canonicalIdx < len(cells) && strings.EqualFold(strings.TrimSpace(cells[canonicalIdx]), want) {
+		return canonicalIdx
+	}
+	for i, c := range cells {
+		if strings.EqualFold(strings.TrimSpace(c), want) {
+			return i
 		}
 	}
-	return model.CareerApplication{}, false
+	return -1
+}
+
+// spliceCellValue swaps a cell's inner value while preserving its surrounding
+// whitespace, so "| Applied |" becomes "| Interview |" rather than "|Interview|".
+func spliceCellValue(cell, newVal string) string {
+	trimmed := strings.TrimSpace(cell)
+	if trimmed == "" {
+		if len(cell) >= 2 {
+			half := len(cell) / 2
+			return cell[:half] + newVal + cell[half:]
+		}
+		return " " + newVal + " "
+	}
+	start := strings.Index(cell, trimmed)
+	return cell[:start] + newVal + cell[start+len(trimmed):]
 }
 
 // cleanTableCell removes trailing pipes and whitespace from a table cell value.
@@ -830,4 +890,134 @@ func safePct(part, whole int) float64 {
 		return 0
 	}
 	return float64(part) / float64(whole) * 100
+}
+
+// UpdateApplicationStatusAndNotes updates both the status and notes of an application in applications.md.
+func UpdateApplicationStatusAndNotes(careerOpsPath string, app model.CareerApplication, newStatus string, newNotes string) error {
+	filePath := filepath.Join(careerOpsPath, "applications.md")
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		filePath = filepath.Join(careerOpsPath, "data", "applications.md")
+		content, err = os.ReadFile(filePath)
+		if err != nil {
+			return err
+		}
+	}
+
+	lines := strings.Split(string(content), "\n")
+	found := false
+
+	colmap := resolveTrackerColumns(lines)
+	statusIdx, statusOk := colmap["status"]
+	if newStatus != "" && !statusOk {
+		return fmt.Errorf("status column not found in tracker")
+	}
+	notesIdx, notesOk := colmap["notes"]
+	if newNotes != "" && !notesOk {
+		return fmt.Errorf("notes column not found in tracker, cannot append notes")
+	}
+
+	for i, line := range lines {
+		if !strings.HasPrefix(strings.TrimSpace(line), "|") {
+			continue
+		}
+		if app.ReportNumber != "" && strings.Contains(line, fmt.Sprintf("[%s]", app.ReportNumber)) {
+			l := line
+			if newStatus != "" {
+				l = replaceStatusInLine(l, app.Status, newStatus, statusIdx)
+			}
+			if newNotes != "" {
+				l = replaceNotesInLine(l, app.Notes, newNotes, notesIdx)
+			}
+			lines[i] = l
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		return fmt.Errorf("application not found: report %s", app.ReportNumber)
+	}
+
+	return os.WriteFile(filePath, []byte(strings.Join(lines, "\n")), 0644)
+}
+
+func replaceNotesInLine(line, oldNotes, newNotes string, notesField int) string {
+	if notesField < 0 {
+		return line
+	}
+	if strings.Contains(line, "\t") {
+		prefix, body, found := strings.Cut(line, "|")
+		if !found {
+			return line
+		}
+		cells := strings.Split(body, "\t")
+		if notesField < len(cells) {
+			cells[notesField] = spliceCellValue(cells[notesField], newNotes)
+			return prefix + "|" + strings.Join(cells, "\t")
+		}
+		return line
+	}
+
+	segments := strings.Split(line, "|")
+	idx := notesField + 1
+	if idx < len(segments) {
+		segments[idx] = spliceCellValue(segments[idx], newNotes)
+		return strings.Join(segments, "|")
+	}
+	return line
+}
+
+// LoadReportDiscardReasons parses predicted discard reasons from a report file.
+func LoadReportDiscardReasons(careerOpsPath, reportPath string) []string {
+	if reportPath == "" {
+		return nil
+	}
+	p := reportPath
+	if strings.Contains(p, "](") {
+		idx := strings.Index(p, "](")
+		p = p[idx+2:]
+		p = strings.TrimSuffix(p, ")")
+	}
+	fullPath := filepath.Join(careerOpsPath, p)
+	content, err := os.ReadFile(fullPath)
+	if err != nil {
+		return nil
+	}
+	text := string(content)
+
+	match := reDiscardReasons.FindStringSubmatch(text)
+	if len(match) < 2 {
+		return nil
+	}
+
+	itemsMatch := reDiscardItem.FindAllStringSubmatch(match[1], -1)
+	var reasons []string
+	for _, item := range itemsMatch {
+		reasons = append(reasons, strings.TrimSpace(item[1]))
+	}
+	return reasons
+}
+
+// SaveAnonymousStat records an anonymized win stat to data/reported-hires.tsv.
+func SaveAnonymousStat(careerOpsPath string, role string, weeks int) error {
+	dirPath := filepath.Join(careerOpsPath, "data")
+	if err := os.MkdirAll(dirPath, 0755); err != nil {
+		return err
+	}
+	filePath := filepath.Join(dirPath, "reported-hires.tsv")
+	f, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	fi, err := f.Stat()
+	if err == nil && fi.Size() == 0 {
+		_, _ = f.WriteString("Date\tRoleType\tWeeksToHire\n")
+	}
+
+	dateStr := time.Now().Format("2006-01-02")
+	_, err = f.WriteString(fmt.Sprintf("%s\t%s\t%d\n", dateStr, role, weeks))
+	return err
 }

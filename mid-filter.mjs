@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// mid-filter.mjs — JD-snippet + full-profile filter for `## Pendientes` in pipeline.md.
+// mid-filter.mjs — JD-snippet + full-profile filter for `## Pending` in pipeline.md.
 //
 // Why: title-only filters can't distinguish role scope when the same title
 // (e.g. "Director of Engineering") spans 5-person startups to 50K-person
@@ -19,7 +19,7 @@
 //   4. Per chunk, send only the jobs as the user message — first chunk pays
 //      full price, subsequent chunks hit the cache.
 //   5. Move scores < threshold to ## Filtered (mid-{date})
-//   6. Keep accepted entries unchanged in ## Pendientes
+//   6. Keep accepted entries unchanged in ## Pending
 //
 // Usage:
 //   node mid-filter.mjs                  # apply (writes backup .bak)
@@ -60,6 +60,15 @@ const argValue = (flag, def) => {
 };
 const MIN_SCORE = parseFloat(argValue('--min-score', '3'));
 const SNIPPET_CHARS = parseInt(argValue('--snippet-chars', '1500'), 10);
+// Location/hybrid-policy language is frequently placed near the END of a JD
+// (after compensation, near visa/logistics boilerplate) — well outside the
+// anchor+SNIPPET_CHARS window extractMeat() takes from "About the role" etc.
+// A missed in-office requirement is a hard location blocker per the
+// candidate's profile, so it must never silently fall outside the snippet
+// sent to the scorer. Budget extra room for it rather than let it compete
+// with (and lose to) the primary snippet truncation.
+const LOCATION_NOTE_MAX = 400;
+const LOCATION_POLICY_RE = /(hybrid|in[- ]office|on[- ]?site|return[- ]to[- ]office|\bRTO\b|days?\s+(a|per)\s+week\s+in|%\s+of\s+the\s+time\s+in|in\s+one\s+of\s+our\s+offices|remote[- ]first|remote[- ]friendly|work\s+location|relocat(e|ion))/i;
 // Default to single-threaded fetch with a polite delay — many job-board
 // origins (dice, builtin, etc.) start returning 4xx or empty SPA shells when
 // they see concurrent connections from the same IP.
@@ -206,8 +215,9 @@ try {
 const lines = text.split(/\r?\n/);
 let pStart = -1;
 let pEnd = lines.length;
+const PENDING_HEADER_RE = /^##\s+(Pending|Pendientes)\s*$/;
 for (let i = 0; i < lines.length; i++) {
-  if (lines[i].trim() === '## Pendientes') {
+  if (PENDING_HEADER_RE.test(lines[i].trim())) {
     pStart = i;
   } else if (pStart >= 0 && lines[i].startsWith('## ')) {
     pEnd = i;
@@ -215,7 +225,7 @@ for (let i = 0; i < lines.length; i++) {
   }
 }
 if (pStart < 0) {
-  console.error('No `## Pendientes` section in pipeline.md');
+  console.error('No `## Pending` section in pipeline.md');
   process.exit(1);
 }
 
@@ -245,17 +255,35 @@ function stripFrontmatter(s) {
 
 function htmlToText(html) {
   return html
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
+    .replace(/<script[\s\S]*?<\/script\b[^>]*>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style\b[^>]*>/gi, ' ')
+    .replace(/<noscript[\s\S]*?<\/noscript\b[^>]*>/gi, ' ')
     .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(parseInt(n, 10)))
+    // Single-pass entity decode so a literal "&amp;lt;" (double-encoded input)
+    // can't be unescaped twice into a live-looking "<" across chained replaces.
+    .replace(/&(nbsp|amp|lt|gt|#\d+);/g, (_, ent) => {
+      if (ent === 'nbsp') return ' ';
+      if (ent === 'amp') return '&';
+      if (ent === 'lt') return '<';
+      if (ent === 'gt') return '>';
+      return String.fromCharCode(parseInt(ent.slice(1), 10));
+    })
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+// Find a location/hybrid-policy mention anywhere in the full JD and return
+// it as a labeled excerpt, but only if it isn't already covered by `meat`
+// (the primary anchored snippet) — avoids duplicating text that's already
+// in view.
+function extractLocationNote(plain, meat) {
+  const m = plain.match(LOCATION_POLICY_RE);
+  if (!m) return '';
+  if (meat.includes(m[0])) return '';
+  const start = Math.max(0, m.index - 80);
+  const end = Math.min(plain.length, m.index + LOCATION_NOTE_MAX - 80);
+  const excerpt = plain.slice(start, end).trim();
+  return `\n[Location/remote-policy excerpt found elsewhere in the JD]: ${excerpt}`;
 }
 
 function extractMeat(plain) {
@@ -265,11 +293,17 @@ function extractMeat(plain) {
   const anchor = plain.match(
     /(About this role|About the role|About the position|About the job|Job description|Responsibilities|What you('| wi)ll do|What you('| wi)ll be doing|The role|Your role|Role overview|Key responsibilities|What we're looking for|Requirements)/i
   );
-  if (anchor) return plain.slice(anchor.index, anchor.index + SNIPPET_CHARS);
-  // Fall back: skip ~200 chars of header (company name / location / posting
-  // date boilerplate) and take a window. Short docs return whatever's there.
-  if (plain.length <= SNIPPET_CHARS + 200) return plain.slice(0, SNIPPET_CHARS);
-  return plain.slice(200, 200 + SNIPPET_CHARS);
+  let meat;
+  if (anchor) {
+    meat = plain.slice(anchor.index, anchor.index + SNIPPET_CHARS);
+  } else if (plain.length <= SNIPPET_CHARS + 200) {
+    // Fall back: skip ~200 chars of header (company name / location / posting
+    // date boilerplate) and take a window. Short docs return whatever's there.
+    meat = plain.slice(0, SNIPPET_CHARS);
+  } else {
+    meat = plain.slice(200, 200 + SNIPPET_CHARS);
+  }
+  return meat + extractLocationNote(plain, meat);
 }
 
 // ── JD cache helpers ────────────────────────────────────────────────
@@ -515,7 +549,9 @@ function buildUserChunk(items) {
     .map((it, i) => {
       const company = it.company || '(unknown)';
       const location = it.location ? ` | ${it.location}` : '';
-      const snippet = it.snippet.replace(/\s+/g, ' ').trim().slice(0, SNIPPET_CHARS);
+      // Budget includes room for extractMeat()'s appended location-policy
+      // note so it can't be clipped off by a second blanket truncation here.
+      const snippet = it.snippet.replace(/\s+/g, ' ').trim().slice(0, SNIPPET_CHARS + LOCATION_NOTE_MAX);
       return `### Job ${i + 1}: ${company} — ${it.title}${location}\n${snippet}`;
     })
     .join('\n\n');
@@ -659,7 +695,7 @@ for (const u of unevaluable) {
 }
 
 console.log('\nVerdicts:');
-console.log(`  ${accepts.length} accepted (kept in Pendientes)`);
+console.log(`  ${accepts.length} accepted (kept in Pending)`);
 console.log(`  ${rejects.length} rejected (score < ${MIN_SCORE})`);
 console.log(`  ${unevaluable.length} unevaluable (kept; couldn't read JD)`);
 
@@ -674,7 +710,7 @@ sample([...scored].sort((a, b) => (b.score || 0) - (a.score || 0)));
 console.log(`\n  Sample rejected (lowest scores):`);
 sample([...rejects].sort((a, b) => (a.score || 0) - (b.score || 0)));
 
-// Rewrite the Pendientes line to point at the cached local: URL when we
+// Rewrite the Pending line to point at the cached local: URL when we
 // have one — keeps downstream tools off the network on re-runs.
 function rebuildEntryLine(a) {
   if (!a.cachedUrl || a.url.startsWith('local:')) return a.raw;
@@ -694,7 +730,7 @@ copyFileSync(PIPELINE, PIPELINE + '.bak');
 console.log(`\n📦 backup → ${PIPELINE}.bak`);
 
 const today = new Date().toISOString().slice(0, 10);
-const newPendientes = ['## Pendientes', ''];
+const newPendientes = ['## Pending', ''];
 const rewritten = accepts.filter(a => a.cachedUrl && !a.url.startsWith('local:')).length;
 for (const a of accepts) newPendientes.push(rebuildEntryLine(a));
 newPendientes.push('');
@@ -749,7 +785,7 @@ if (existingIdx >= 0) {
   const mergedSection = [
     todayHeader,
     '',
-    `<!-- ${totalCount} entries removed by mid-filter.mjs on ${today} (merged across runs). Threshold: score < ${MIN_SCORE}. To restore, move lines back to ## Pendientes. -->`,
+    `<!-- ${totalCount} entries removed by mid-filter.mjs on ${today} (merged across runs). Threshold: score < ${MIN_SCORE}. To restore, move lines back to ## Pending. -->`,
     '',
     ...existingRejects,
     '',
@@ -760,7 +796,7 @@ if (existingIdx >= 0) {
   const freshSection = [
     todayHeader,
     '',
-    `<!-- ${rejects.length} entries removed by mid-filter.mjs on ${today}. Threshold: score < ${MIN_SCORE}. To restore, move lines back to ## Pendientes. -->`,
+    `<!-- ${rejects.length} entries removed by mid-filter.mjs on ${today}. Threshold: score < ${MIN_SCORE}. To restore, move lines back to ## Pending. -->`,
     '',
     ...newRejectLines,
     '',
@@ -771,7 +807,7 @@ if (existingIdx >= 0) {
 writeFileSync(PIPELINE, [...head, ...newPendientes, ...mergedTail].join('\n'));
 
 console.log(`✅ wrote ${PIPELINE}`);
-console.log(`   Pendientes: ${accepts.length} (${rewritten} URLs rewritten to local:jds/)`);
+console.log(`   Pending: ${accepts.length} (${rewritten} URLs rewritten to local:jds/)`);
 console.log(`   Filtered:   ${rejects.length}`);
 
 await closeBrowser();
