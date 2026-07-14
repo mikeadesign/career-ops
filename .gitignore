@@ -6,7 +6,7 @@ data/applications.db
 data/pipeline.md
 data/scan-semantic-log.tsv
 data/scan-history.tsv
-data/scan-semantic-log.tsv
+data/scan-runs.tsv
 data/tasks.md
 data/follow-ups.md
 data/parser-output/**/*.json
