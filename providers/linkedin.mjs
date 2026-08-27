@@ -343,6 +343,30 @@ async function scrollToLoadResults(page) {
   await sleep(1000);
 }
 
+async function hasPaginationControl(page) {
+  return page.evaluate(xpath => {
+    const r = document.evaluate(xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+    return Boolean(r.singleNodeValue);
+  }, SELECTORS.xpathPageButton);
+}
+
+// LinkedIn's numbered-page footer only mounts once the results list has been
+// scrolled deep enough to lazy-render past the initial card batch — the
+// 5-iteration scroll in scrollToLoadResults() is tuned for loading enough
+// cards to read, not for reaching the footer below them. Without this,
+// goToNextPage() silently finds no "Page 2" button and the search reports
+// itself done after page 1, even when LinkedIn has more results. Poll
+// (rather than a fixed scroll count) so this adapts to however many cards
+// actually loaded instead of guessing a magic number.
+async function scrollUntilPaginationVisible(page, { maxAttempts = 12 } = {}) {
+  for (let i = 0; i < maxAttempts; i++) {
+    if (await hasPaginationControl(page)) return true;
+    await page.mouse.wheel(0, randomDelay([400, 900]));
+    await sleep(randomDelay([500, 1000]));
+  }
+  return hasPaginationControl(page);
+}
+
 async function getCardCount(page) {
   return page.evaluate(sel => document.querySelectorAll(sel).length, SELECTORS.listingCard);
 }
@@ -351,14 +375,26 @@ async function clickCard(page, index) {
   return page.evaluate(({ sel, link, idx }) => {
     const cards = document.querySelectorAll(sel);
     const card = cards[idx];
-    if (!card) return false;
+    if (!card) return { clicked: false, jobId: null };
     // Prefer the inner /jobs/view/ link — clicking the bare wrapper sometimes
     // hits a non-clickable parent on certain LinkedIn variants. The link click
-    // still loads the right-pane detail without navigating.
+    // still loads the right-pane detail without navigating (LinkedIn's search
+    // results are a single-page app: the click updates a `currentJobId` query
+    // param on the *search* URL rather than performing a real navigation to
+    // `/jobs/view/{id}/`, so `window.location.href` after the click is a
+    // search-results link, not the job's canonical permalink). The card's own
+    // `data-job-id` attribute is the reliable source for the real job ID,
+    // independent of that SPA routing quirk.
     const a = card.querySelector(link);
     (a || card).click();
-    return true;
+    return { clicked: true, jobId: card.getAttribute('data-job-id') || null };
   }, { sel: SELECTORS.listingCard, link: SELECTORS.cardJobsViewLink, idx: index });
+}
+
+// LinkedIn's canonical, directly-clickable permalink for a job posting —
+// stable and independent of any search-session query params.
+function canonicalJobUrl(jobId) {
+  return jobId ? `https://www.linkedin.com/jobs/view/${jobId}/` : null;
 }
 
 async function extractDetailFromPanel(page) {
@@ -507,7 +543,8 @@ async function runSearch(page, entry) {
     for (let i = 0; i < cardCount; i++) {
       if (accepted.length >= max) break;
 
-      if (!await clickCard(page, i)) {
+      const clickResult = await clickCard(page, i);
+      if (!clickResult.clicked) {
         warn(`  ✗ Could not click card ${i}`);
         continue;
       }
@@ -523,6 +560,11 @@ async function runSearch(page, entry) {
         continue;
       }
       detail.applicationUrl = unwrapRedirect(detail.applicationUrl);
+      // Prefer the canonical /jobs/view/ permalink built from the card's own
+      // data-job-id over window.location.href, which is a search-results URL
+      // (see clickCard's comment) — falls back to that search URL only if
+      // LinkedIn's markup ever drops the data-job-id attribute.
+      detail.url = canonicalJobUrl(clickResult.jobId) || detail.url;
 
       // Within-search dedup (same role can appear on multiple pages)
       if (seenInSearch.has(detail.url)) continue;
@@ -553,6 +595,10 @@ async function runSearch(page, entry) {
     }
 
     if (accepted.length < max) {
+      const paginationReady = await scrollUntilPaginationVisible(page);
+      if (!paginationReady) {
+        log('  (no further pages found)');
+      }
       hasNextPage = await goToNextPage(page);
       if (hasNextPage) await sleep(randomDelay(delayPages));
     } else {
