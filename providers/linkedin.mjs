@@ -515,6 +515,36 @@ ${detail.jdText}
   return `${JDS_DIR}/${filename}`;
 }
 
+// TEMPORARY DIAGNOSTIC — see call site in runSearch(). Writes to
+// .tmp-linkedin-debug/ (gitignored scratch space, not jds/ or reports/) so
+// screenshots and HTML dumps never leak into tracked pipeline data.
+const DEBUG_DIR = '.tmp-linkedin-debug';
+
+async function dumpDebugSnapshot(page, searchName, pageNum) {
+  try {
+    mkdirSync(DEBUG_DIR, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const base = `${slugify(searchName)}-p${pageNum}-${stamp}`;
+    await page.screenshot({ path: join(DEBUG_DIR, `${base}.png`), fullPage: true });
+    const html = await page.content();
+    writeFileSync(join(DEBUG_DIR, `${base}.html`), html, 'utf-8');
+    warn(`  0 cards — debug snapshot saved: ${DEBUG_DIR}/${base}.{png,html}`);
+  } catch (err) {
+    warn(`  0 cards — debug snapshot failed: ${err.message}`);
+  }
+}
+
+// A valid, authenticated session (confirmed via checkSession() on /feed/)
+// can still land on LinkedIn's public, logged-out SEO template when the
+// job-search URL is hit as a cold direct navigation — that guest template
+// has no `data-job-id` cards and shows a "Sign in to view more jobs" modal
+// instead of the real authenticated single-page app. The authenticated
+// chrome (SELECTORS.loggedIn, present on every real logged-in page) is
+// absent on the guest template, so its absence here is the signal.
+async function isOnGuestTemplate(page) {
+  return !(await page.$(SELECTORS.loggedIn));
+}
+
 // ── Search execution ────────────────────────────────────────────────
 
 async function runSearch(page, entry) {
@@ -526,6 +556,20 @@ async function runSearch(page, entry) {
 
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
   await sleep(randomDelay(delayPages));
+
+  // Retry once through a "warm" navigation (feed → search) if we landed on
+  // the guest template despite a valid session — see isOnGuestTemplate().
+  if (await isOnGuestTemplate(page)) {
+    warn('  Landed on guest template despite valid session — retrying via feed warm-up');
+    await page.goto(FEED_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await sleep(randomDelay(delayPages));
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await sleep(randomDelay(delayPages));
+    if (await isOnGuestTemplate(page)) {
+      warn('  Still on guest template after warm-up retry — session may need re-login');
+    }
+  }
+
   await scrollToLoadResults(page);
 
   const accepted = [];
@@ -539,6 +583,17 @@ async function runSearch(page, entry) {
 
     const cardCount = await getCardCount(page);
     log(`Found ${cardCount} cards`);
+
+    // TEMPORARY DIAGNOSTIC — remove once the zero-cards issue is root-caused.
+    // A working search returning 0 cards means either the listingCard
+    // selector no longer matches LinkedIn's current markup, or LinkedIn
+    // served something other than a normal results page (challenge,
+    // "no results" state, rate-limit wall, etc.) for this session/query.
+    // Capture what the page actually looked like so it can be inspected
+    // without needing a live authenticated session.
+    if (cardCount === 0) {
+      await dumpDebugSnapshot(page, entry.search, currentPage || 1);
+    }
 
     for (let i = 0; i < cardCount; i++) {
       if (accepted.length >= max) break;
