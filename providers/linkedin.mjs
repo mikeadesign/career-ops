@@ -142,12 +142,9 @@ async function closeContext() {
 
 let loginInProgress = null;
 
-async function ensureSession({ headless = true } = {}) {
+async function ensureSession() {
   // Fast path — current persistent context already has a live session.
-  // getContext() is a singleton keyed by first call, so the headless value
-  // used here must match whatever fetch() will request afterward — passing
-  // a stale default would lock the whole run into the wrong mode silently.
-  let ctx = await getContext({ headless });
+  let ctx = await getContext({ headless: true });
   let page = await ctx.newPage();
   try {
     if (await checkSession(page)) return;
@@ -526,32 +523,16 @@ ${detail.jdText}
   return `${JDS_DIR}/${filename}`;
 }
 
-// TEMPORARY DIAGNOSTIC — see call site in runSearch(). Writes to
-// .tmp-linkedin-debug/ (gitignored scratch space, not jds/ or reports/) so
-// screenshots and HTML dumps never leak into tracked pipeline data.
-const DEBUG_DIR = '.tmp-linkedin-debug';
-
-async function dumpDebugSnapshot(page, searchName, pageNum) {
-  try {
-    mkdirSync(DEBUG_DIR, { recursive: true });
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const base = `${slugify(searchName)}-p${pageNum}-${stamp}`;
-    await page.screenshot({ path: join(DEBUG_DIR, `${base}.png`), fullPage: true });
-    const html = await page.content();
-    writeFileSync(join(DEBUG_DIR, `${base}.html`), html, 'utf-8');
-    warn(`  debug snapshot saved: ${DEBUG_DIR}/${base}.{png,html}`);
-  } catch (err) {
-    warn(`  debug snapshot failed: ${err.message}`);
-  }
-}
-
 // A valid, authenticated session (confirmed via checkSession() on /feed/)
 // can still land on LinkedIn's public, logged-out SEO template when the
 // job-search URL is hit as a cold direct navigation — that guest template
 // has no `data-job-id` cards and shows a "Sign in to view more jobs" modal
 // instead of the real authenticated single-page app. The authenticated
-// chrome (SELECTORS.loggedIn, present on every real logged-in page) is
-// absent on the guest template, so its absence here is the signal.
+// chrome (SELECTORS.loggedIn) is normally present on every logged-in page,
+// but it isn't a reliable signal on its own — it's been observed absent
+// on pages that still had real cards and worked fine. Only trust it when
+// paired with an actual empty result (see the 0-card check in runSearch()),
+// so a slow-to-render nav element doesn't get misread as a real problem.
 async function isOnGuestTemplate(page) {
   return !(await page.$(SELECTORS.loggedIn));
 }
@@ -567,21 +548,26 @@ async function runSearch(page, entry) {
 
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
   await sleep(randomDelay(delayPages));
+  await scrollToLoadResults(page);
 
-  // Retry once through a "warm" navigation (feed → search) if we landed on
-  // the guest template despite a valid session — see isOnGuestTemplate().
-  if (await isOnGuestTemplate(page)) {
-    warn('  Landed on guest template despite valid session — retrying via feed warm-up');
+  // A direct cold navigation into /jobs/search/ can land on LinkedIn's
+  // public, logged-out SEO template despite a genuinely valid session
+  // (confirmed working on /feed/ via checkSession()) — that guest template
+  // has no `data-job-id` cards. Only treat this as a real problem when it's
+  // paired with an actual empty result: isOnGuestTemplate() alone produced
+  // false positives on pages that had real cards and worked fine, likely a
+  // slow-to-render nav element rather than a genuine guest-template case.
+  if ((await getCardCount(page)) === 0 && (await isOnGuestTemplate(page))) {
+    warn('  No cards + no authenticated chrome — retrying via feed warm-up');
     await page.goto(FEED_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await sleep(randomDelay(delayPages));
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await sleep(randomDelay(delayPages));
-    if (await isOnGuestTemplate(page)) {
-      warn('  Still on guest template after warm-up retry — session may need re-login');
+    await scrollToLoadResults(page);
+    if ((await getCardCount(page)) === 0 && (await isOnGuestTemplate(page))) {
+      warn('  Still 0 cards after warm-up retry — session may need re-login');
     }
   }
-
-  await scrollToLoadResults(page);
 
   const accepted = [];
   const seenInSearch = new Set();
@@ -594,17 +580,6 @@ async function runSearch(page, entry) {
 
     const cardCount = await getCardCount(page);
     log(`Found ${cardCount} cards`);
-
-    // TEMPORARY DIAGNOSTIC — remove once the zero-cards issue is root-caused.
-    // A working search returning 0 cards means either the listingCard
-    // selector no longer matches LinkedIn's current markup, or LinkedIn
-    // served something other than a normal results page (challenge,
-    // "no results" state, rate-limit wall, etc.) for this session/query.
-    // Capture what the page actually looked like so it can be inspected
-    // without needing a live authenticated session.
-    if (cardCount === 0) {
-      await dumpDebugSnapshot(page, entry.search, currentPage || 1);
-    }
 
     for (let i = 0; i < cardCount; i++) {
       if (accepted.length >= max) break;
@@ -664,21 +639,8 @@ async function runSearch(page, entry) {
       const paginationReady = await scrollUntilPaginationVisible(page);
       if (!paginationReady) {
         log('  (no further pages found)');
-        // TEMPORARY DIAGNOSTIC — see dumpDebugSnapshot()/cardCount===0 call
-        // above. Cards loaded fine (headed mode confirmed that), but no
-        // "Page N" button was ever found even after scrolling — capture
-        // what the footer area actually looks like.
-        await dumpDebugSnapshot(page, entry.search, `${currentPage || 1}-nopagectrl`);
       }
       hasNextPage = await goToNextPage(page);
-      if (!hasNextPage && paginationReady) {
-        // A page-N button WAS found (paginationReady), but goToNextPage()
-        // still couldn't advance — its own current-page-then-next-N logic
-        // failed even though the generic xpathPageButton match succeeded.
-        // Capture this mismatch case too; it's the more surprising one.
-        warn('  Pagination control found but could not advance — dumping snapshot');
-        await dumpDebugSnapshot(page, entry.search, `${currentPage || 1}-stuck`);
-      }
       if (hasNextPage) await sleep(randomDelay(delayPages));
     } else {
       hasNextPage = false;
@@ -746,24 +708,12 @@ export default {
       throw new Error(`linkedin: entry ${entry.name} missing 'search' (the keyword query)`);
     }
 
-    // TEMPORARY DIAGNOSTIC — set LINKEDIN_HEADED=1 to run the ENTIRE fetch
-    // (session check + search) in a visible browser instead of headless, to
-    // test whether LinkedIn is serving the guest/logged-out template
-    // specifically to headless automation on the Jobs surface (see the
-    // "guest template" fix commit). Must be threaded into ensureSession()
-    // too, not just here — getContext() is a same-process singleton, so
-    // whichever headless value is requested FIRST wins for the whole run;
-    // passing mismatched values would silently keep it in the wrong mode.
-    // Remove this flag once the theory is confirmed or ruled out.
-    const headed = process.env.LINKEDIN_HEADED === '1';
-    if (headed) warn('  LINKEDIN_HEADED=1 — running this search in a visible browser');
-
     // Block until we have a valid session — this triggers the inline login
     // flow on TTY runs, or fails fast on cron/CI runs. Concurrent LinkedIn
     // fetches share a single in-flight login via the loginInProgress promise.
-    await ensureSession({ headless: !headed });
+    await ensureSession();
 
-    const ctx = await getContext({ headless: !headed });
+    const ctx = await getContext({ headless: true });
     const page = await ctx.newPage();
     try {
       return await runSearch(page, entry);
