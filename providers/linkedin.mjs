@@ -134,9 +134,12 @@ async function closeContext() {
 
 let loginInProgress = null;
 
-async function ensureSession() {
+async function ensureSession({ headless = true } = {}) {
   // Fast path — current persistent context already has a live session.
-  let ctx = await getContext({ headless: true });
+  // getContext() is a singleton keyed by first call, so the headless value
+  // used here must match whatever fetch() will request afterward — passing
+  // a stale default would lock the whole run into the wrong mode silently.
+  let ctx = await getContext({ headless });
   let page = await ctx.newPage();
   try {
     if (await checkSession(page)) return;
@@ -722,12 +725,24 @@ export default {
       throw new Error(`linkedin: entry ${entry.name} missing 'search' (the keyword query)`);
     }
 
+    // TEMPORARY DIAGNOSTIC — set LINKEDIN_HEADED=1 to run the ENTIRE fetch
+    // (session check + search) in a visible browser instead of headless, to
+    // test whether LinkedIn is serving the guest/logged-out template
+    // specifically to headless automation on the Jobs surface (see the
+    // "guest template" fix commit). Must be threaded into ensureSession()
+    // too, not just here — getContext() is a same-process singleton, so
+    // whichever headless value is requested FIRST wins for the whole run;
+    // passing mismatched values would silently keep it in the wrong mode.
+    // Remove this flag once the theory is confirmed or ruled out.
+    const headed = process.env.LINKEDIN_HEADED === '1';
+    if (headed) warn('  LINKEDIN_HEADED=1 — running this search in a visible browser');
+
     // Block until we have a valid session — this triggers the inline login
     // flow on TTY runs, or fails fast on cron/CI runs. Concurrent LinkedIn
     // fetches share a single in-flight login via the loginInProgress promise.
-    await ensureSession();
+    await ensureSession({ headless: !headed });
 
-    const ctx = await getContext({ headless: true });
+    const ctx = await getContext({ headless: !headed });
     const page = await ctx.newPage();
     try {
       return await runSearch(page, entry);
