@@ -69,7 +69,15 @@ const SELECTORS = {
   panelMoreButton: '.jobs-description__footer-button button, button.jobs-description__footer-button',
 
   loggedIn: 'a[aria-label*="My Network"]',
-  xpathCurrentPage: "//button[@aria-current='true'][starts-with(@aria-label, 'Page')]",
+  // LinkedIn's pagination footer marks the active page with the WAI-ARIA
+  // spec value `aria-current="page"` (see WAI-ARIA Authoring Practices —
+  // valid aria-current values include "page", "step", "location", "date",
+  // "time", "true", "false"). A prior version of this selector guessed the
+  // generic "true" instead of the spec-correct "page", which never matched
+  // — goToNextPage() silently returned false on every call as a result,
+  // independent of scrolling or timing. Confirmed against a captured
+  // snapshot of the live DOM: `aria-current="page" aria-label="Page 1"`.
+  xpathCurrentPage: "//button[@aria-current='page'][starts-with(@aria-label, 'Page')]",
   xpathPageButton: "//button[starts-with(@aria-label, 'Page')]",
 };
 
