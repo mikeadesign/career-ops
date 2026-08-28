@@ -531,9 +531,9 @@ async function dumpDebugSnapshot(page, searchName, pageNum) {
     await page.screenshot({ path: join(DEBUG_DIR, `${base}.png`), fullPage: true });
     const html = await page.content();
     writeFileSync(join(DEBUG_DIR, `${base}.html`), html, 'utf-8');
-    warn(`  0 cards — debug snapshot saved: ${DEBUG_DIR}/${base}.{png,html}`);
+    warn(`  debug snapshot saved: ${DEBUG_DIR}/${base}.{png,html}`);
   } catch (err) {
-    warn(`  0 cards — debug snapshot failed: ${err.message}`);
+    warn(`  debug snapshot failed: ${err.message}`);
   }
 }
 
@@ -656,8 +656,21 @@ async function runSearch(page, entry) {
       const paginationReady = await scrollUntilPaginationVisible(page);
       if (!paginationReady) {
         log('  (no further pages found)');
+        // TEMPORARY DIAGNOSTIC — see dumpDebugSnapshot()/cardCount===0 call
+        // above. Cards loaded fine (headed mode confirmed that), but no
+        // "Page N" button was ever found even after scrolling — capture
+        // what the footer area actually looks like.
+        await dumpDebugSnapshot(page, entry.search, `${currentPage || 1}-nopagectrl`);
       }
       hasNextPage = await goToNextPage(page);
+      if (!hasNextPage && paginationReady) {
+        // A page-N button WAS found (paginationReady), but goToNextPage()
+        // still couldn't advance — its own current-page-then-next-N logic
+        // failed even though the generic xpathPageButton match succeeded.
+        // Capture this mismatch case too; it's the more surprising one.
+        warn('  Pagination control found but could not advance — dumping snapshot');
+        await dumpDebugSnapshot(page, entry.search, `${currentPage || 1}-stuck`);
+      }
       if (hasNextPage) await sleep(randomDelay(delayPages));
     } else {
       hasNextPage = false;
