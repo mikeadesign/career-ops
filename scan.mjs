@@ -24,6 +24,7 @@
  *   node scan.mjs                  # scan all enabled companies
  *   node scan.mjs --dry-run        # preview without writing files
  *   node scan.mjs --company Cohere # scan a single company
+ *   node scan.mjs --login linkedin # log in to an auth-gated provider and exit (no scan)
  *   node scan.mjs --verify         # Playwright-check each new URL; drop expired postings
  *   node scan.mjs --verify --headed-fallback  # retry anti-bot-blocked URLs in a headed browser (needs a display)
  *   node scan.mjs --verify --throttle          # jittered ~5-10s gap between checks (stay under rate limits)
@@ -1265,6 +1266,24 @@ async function main() {
   if (providers.size === 0) {
     console.error('Error: no providers loaded from providers/');
     process.exit(1);
+  }
+
+  // --login <provider>: run that provider's interactive login and exit without
+  // scanning. Lets you warm an auth-gated session (e.g. linkedin) before an
+  // unattended run.
+  const loginIdx = args.indexOf('--login');
+  if (loginIdx !== -1) {
+    const loginId = args[loginIdx + 1];
+    const loginProvider = loginId ? providers.get(loginId) : null;
+    if (!loginProvider || typeof loginProvider.login !== 'function') {
+      const available = [...providers.values()].filter((p) => typeof p.login === 'function').map((p) => p.id);
+      console.error(
+        `Error: --login needs a provider that supports login (${available.join(', ') || 'none loaded'}); got ${loginId ? `"${loginId}"` : 'nothing'}.`,
+      );
+      process.exit(1);
+    }
+    const ok = await loginProvider.login();
+    process.exit(ok ? 0 : 1);
   }
 
   // 2. Read portals.yml
