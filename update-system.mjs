@@ -454,8 +454,8 @@ const SYSTEM_PATHS = [
 
   // Local-only scripts (this fork, not shipped upstream) -- system-layer
   // tooling, not user data, so they belong here rather than USER_PATHS.
-  // The Tasks dashboard feature's Go half is already covered by the
-  // 'dashboard/' prefix entry above; these are its .mjs/.sh half plus a
+  // The Tasks dashboard feature has a Go half already covered by the
+  // dashboard/ prefix entry above; these are its mjs/sh half plus a
   // handful of other local-only utility scripts.
   'add-task.mjs',
   'sync-tasks.mjs',
