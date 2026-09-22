@@ -451,6 +451,24 @@ const SYSTEM_PATHS = [
   'seed-fixture.mjs',
   'test-fixtures/',
   'upgrade-tests.mjs',
+
+  // Local-only scripts (this fork, not shipped upstream) -- system-layer
+  // tooling, not user data, so they belong here rather than USER_PATHS.
+  // The Tasks dashboard feature's Go half is already covered by the
+  // 'dashboard/' prefix entry above; these are its .mjs/.sh half plus a
+  // handful of other local-only utility scripts.
+  'add-task.mjs',
+  'sync-tasks.mjs',
+  'nightly-careerops.sh',
+  'mid-filter.mjs',
+  'analyze-filter-patterns.mjs',
+  'dedup-utils.mjs',
+  'scan-semantic.mjs',
+  'triage-pending.mjs',
+  'update-pipeline-scores.mjs',
+  'test-linkedin-config.mjs',
+  'test-salary-filter.mjs',
+  'test-trust-validator.mjs',
 ];
 
 const BOOTSTRAP_PATHS = [

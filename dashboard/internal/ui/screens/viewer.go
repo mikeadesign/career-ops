@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -43,6 +44,14 @@ type ViewerModel struct {
 	coverLetterPath string
 	statusPicker    bool
 	statusCursor    int
+	// rawReport is the report file content exactly as read from disk. It (and
+	// the deep-research prompt extracted from it) back the clipboard-copy
+	// action so a yank reproduces the report, not the rendered/wrapped lines.
+	rawReport  string
+	deepPrompt string
+	// flash is a transient status line shown in the footer (e.g. the result of
+	// a clipboard copy). Cleared on the next keypress.
+	flash string
 }
 
 // NewViewerModel creates a new file viewer for the given path.
@@ -52,9 +61,10 @@ func NewViewerModel(t theme.Theme, careerOpsPath, path, title string, width, hei
 		content = []byte("Error reading file: " + err.Error())
 	}
 
+	raw := string(content)
 	var lines []string
 	if len(content) > 0 {
-		lines = strings.Split(string(content), "\n")
+		lines = strings.Split(raw, "\n")
 	}
 
 	m := ViewerModel{
@@ -66,6 +76,8 @@ func NewViewerModel(t theme.Theme, careerOpsPath, path, title string, width, hei
 		app:             app,
 		careerOpsPath:   careerOpsPath,
 		coverLetterPath: parseCoverLetterPath(lines, careerOpsPath),
+		rawReport:       raw,
+		deepPrompt:      extractDeepPrompt(raw),
 	}
 	m.rebuildRender()
 	return m
@@ -128,13 +140,40 @@ func (m *ViewerModel) Resize(width, height int) {
 
 func (m ViewerModel) Update(msg tea.Msg) (ViewerModel, tea.Cmd) {
 	switch msg := msg.(type) {
+	case viewerCopyResultMsg:
+		switch {
+		case msg.err != nil:
+			m.flash = "Copy failed: " + msg.err.Error()
+		case msg.withPrompt:
+			m.flash = "Copied deep prompt + evaluation to clipboard"
+		default:
+			m.flash = "Copied evaluation to clipboard (no deep prompt in report)"
+		}
+		return m, nil
+
 	case tea.KeyMsg:
+		// Any keystroke dismisses a lingering flash so it never sticks around
+		// past the action that produced it.
+		m.flash = ""
 		if m.statusPicker {
 			return m.handleStatusPicker(msg)
 		}
 		switch msg.String() {
 		case "q", "esc":
 			return m, func() tea.Msg { return ViewerClosedMsg{} }
+
+		case "y":
+			// Yank the report to the clipboard. When the report embeds a
+			// deep-research prompt (score cleared the threshold at eval time),
+			// the prompt leads and the evaluation follows as context.
+			payload, withPrompt := m.clipboardPayload()
+			if strings.TrimSpace(payload) == "" {
+				m.flash = "Nothing to copy"
+				return m, nil
+			}
+			return m, func() tea.Msg {
+				return viewerCopyResultMsg{withPrompt: withPrompt, err: copyToClipboard(payload)}
+			}
 
 		case "c":
 			m.statusPicker = true
@@ -717,11 +756,22 @@ func (m ViewerModel) renderFooter() string {
 				keyStyle.Render("Esc/q") + descStyle.Render(i18n.Current.HelpCancel))
 	}
 
+	// A pending flash (e.g. clipboard-copy result) takes over the footer until
+	// the next keystroke clears it.
+	if m.flash != "" {
+		flashStyle := lipgloss.NewStyle().Bold(true).Foreground(m.theme.Green)
+		if strings.HasPrefix(m.flash, "Copy failed") {
+			flashStyle = flashStyle.Foreground(m.theme.Red)
+		}
+		return style.Render(flashStyle.Render(m.flash))
+	}
+
 	// Render standard footer shortcuts
 	footer := keyStyle.Render("↑↓") + descStyle.Render(i18n.Current.HelpScroll) + // nav
 		keyStyle.Render("PgUp/Dn") + descStyle.Render(i18n.Current.HelpPage) + // pagination
 		keyStyle.Render("g/G") + descStyle.Render(i18n.Current.HelpTopEnd) + // top/bottom
 		keyStyle.Render("c") + descStyle.Render(i18n.Current.HelpChange) + // status
+		keyStyle.Render("y") + descStyle.Render(" copy  ") + // clipboard
 		keyStyle.Render("t") + descStyle.Render(i18n.Current.HelpLanguage) + // language
 		keyStyle.Render("Esc") + descStyle.Render(i18n.Current.HelpBack) // exit
 
@@ -803,4 +853,34 @@ func (m ViewerModel) currentStatusPairs() []StatusPair {
 // UpdateAppStatus updates the status of the current application inside the viewer model.
 func (m *ViewerModel) UpdateAppStatus(newStatus string) {
 	m.app.Status = newStatus
+}
+
+// wordWrap performs greedy word-wrap: pack as many whitespace-separated words
+// as fit within width (measured in runes) onto each line before breaking.
+func wordWrap(text string, width int) []string {
+	words := strings.Fields(text)
+	if len(words) == 0 {
+		return []string{text}
+	}
+	var lines []string
+	var current strings.Builder
+	for _, w := range words {
+		if current.Len() == 0 {
+			current.WriteString(w)
+			continue
+		}
+		runeLen := utf8.RuneCountInString(current.String()) + 1 + utf8.RuneCountInString(w)
+		if runeLen <= width {
+			current.WriteByte(' ')
+			current.WriteString(w)
+		} else {
+			lines = append(lines, current.String())
+			current.Reset()
+			current.WriteString(w)
+		}
+	}
+	if current.Len() > 0 {
+		lines = append(lines, current.String())
+	}
+	return lines
 }
