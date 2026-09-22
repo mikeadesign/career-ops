@@ -193,6 +193,15 @@ The Importance column does **not** affect the 1-5 global score — it is a prior
 
 **Mandatory for every `❌ Missing` or `⚠️ Partial` row at `critical` or `high` importance:** a specific interview-risk description **and** a mitigation strategy, here in Gaps. Risk lives here rather than in a sixth table column — a risk sentence has to be specific to be worth anything, and a specific sentence does not fit a markdown cell that must also render in a terminal and on a phone. Keeping risk next to its mitigation keeps the pair together.
 
+### Pre-Decision Gate — Structural Gap Re-check
+
+Before writing a `final_decision` of "Apply" (or "Consider") at any score below 4.5, re-scan the gaps just written against two structural weighting signals — regardless of whether `modes/_profile.md` defines an explicit domain guardrail for this archetype:
+
+1. **Required-qualification repetition:** does the JD state the gapped skill or domain as a required qualification, and repeat it as a named responsibility in two or more separate places in the posting — not one passing mention among many duties?
+2. **Named counterpart / sibling role:** does the JD name a distinct sibling role that divides responsibility along the same axis as the gap (e.g. a "Platform" Director alongside a "Product" Director), implying this seat carries the gapped responsibility as its core, not a shared or delegable one?
+
+If either signal is present for a gap already marked ❌ Gap or described as "real" rather than a framing issue, do not let the Gaps-and-mitigation narrative present it as bridgeable through a cover-letter angle or a screening-call conversation alone. Reflect the added weight in the Match with CV and North Star Alignment scores, not just in prose, and do not let a clean Apply survive this check unqualified. This is a deterministic-style re-check pass over the narrative already written, run once more immediately before the final decision line — the same verdict-integrity discipline that Global Rule 3d already requires between Block B's rows and its own summary (`modes/_shared.md`), applied one level up between Block B and the final score.
+
 ## Block C — Level and Strategy
 
 1. **Level detected** in the JD vs **candidate's natural level for that archetype**

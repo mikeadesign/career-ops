@@ -24,6 +24,7 @@
  *   node scan.mjs                  # scan all enabled companies
  *   node scan.mjs --dry-run        # preview without writing files
  *   node scan.mjs --company Cohere # scan a single company
+ *   node scan.mjs --login linkedin # log in to an auth-gated provider and exit (no scan)
  *   node scan.mjs --verify         # Playwright-check each new URL; drop expired postings
  *   node scan.mjs --verify --headed-fallback  # retry anti-bot-blocked URLs in a headed browser (needs a display)
  *   node scan.mjs --verify --throttle          # jittered ~5-10s gap between checks (stay under rate limits)
@@ -2384,8 +2385,15 @@ Paste job URLs below as \`- [ ] {url}\` then run \`/career-ops pipeline\`.
 
 // Current section names (English). Legacy Spanish names are checked as fallback
 // so existing pipeline.md files created before this change keep working.
-const PENDING_MARKERS = ['## Pending', '## Pendientes'];
-const PROCESSED_MARKERS = ['## Processed', '## Procesadas'];
+//
+// Matched as a line-exact header, not a raw substring search — an archived
+// "## Filtered (mid-...)" block can contain a restore-instruction comment
+// that literally says "move lines back to ## Pending", and a substring match
+// on that text previously caused new offers to be inserted into the wrong
+// (archived) section instead of the real Pending section.
+const isPendingHeader = (line) => /^##\s+(Pending|Pendientes)\s*$/.test(line.trim());
+const isProcessedHeader = (line) => /^##\s+(Processed|Procesadas)\s*$/.test(line.trim());
+const isAnyHeader = (line) => line.startsWith('## ');
 
 // Locked (pipeline-lock.mjs) so scan.mjs, scan-ats-full.mjs, and plugins.mjs
 // (pipeline mode) — the three current callers — can never interleave their
@@ -2397,33 +2405,38 @@ export async function appendToPipeline(offers, { pipelinePath = PIPELINE_PATH } 
 
   await withPipelineLock(pipelinePath, async () => {
     // Auto-create with standard skeleton if missing (fresh-install guard).
-    let text = existsSync(pipelinePath)
+    const text = existsSync(pipelinePath)
       ? readFileSync(pipelinePath, 'utf-8')
       : PIPELINE_SKELETON;
+    const lines = text.split('\n');
 
-    const marker = PENDING_MARKERS.find(m => text.includes(m)) ?? null;
-    const idx = marker !== null ? text.indexOf(marker) : -1;
-
-    if (idx === -1) {
-      // No Pending section found — insert one before Processed (or at end)
-      const procIdx = PROCESSED_MARKERS.reduce((found, m) => {
-        const i = text.indexOf(m);
-        return (found === -1 || (i !== -1 && i < found)) ? i : found;
-      }, -1);
-      const insertAt = procIdx === -1 ? text.length : procIdx;
-      const block = `\n## Pending\n\n` + offers.map(formatPipelineOffer).join('\n') + '\n\n';
-      text = text.slice(0, insertAt) + block + text.slice(insertAt);
-    } else {
-      // Find the end of existing Pending content (next ## or end)
-      const afterMarker = idx + marker.length;
-      const nextSection = text.indexOf('\n## ', afterMarker);
-      const insertAt = nextSection === -1 ? text.length : nextSection;
-
-      const block = '\n' + offers.map(formatPipelineOffer).join('\n') + '\n';
-      text = text.slice(0, insertAt) + block + text.slice(insertAt);
+    let pStart = -1;
+    let insertLineIdx = -1;
+    for (let i = 0; i < lines.length; i++) {
+      if (isPendingHeader(lines[i])) {
+        pStart = i;
+        insertLineIdx = lines.length;
+        for (let j = i + 1; j < lines.length; j++) {
+          if (isAnyHeader(lines[j])) { insertLineIdx = j; break; }
+        }
+        break;
+      }
     }
 
-    atomicWriteFile(pipelinePath, text);
+    const newLines = offers.map(formatPipelineOffer);
+
+    if (pStart === -1) {
+      // No Pending section found — insert one before Processed (or at end).
+      let procIdx = lines.length;
+      for (let i = 0; i < lines.length; i++) {
+        if (isProcessedHeader(lines[i])) { procIdx = i; break; }
+      }
+      lines.splice(procIdx, 0, '## Pending', '', ...newLines, '');
+    } else {
+      lines.splice(insertLineIdx, 0, ...newLines);
+    }
+
+    atomicWriteFile(pipelinePath, lines.join('\n'));
   });
 }
 
@@ -2923,6 +2936,24 @@ async function main() {
   if (providers.size === 0) {
     console.error('Error: no providers loaded from providers/');
     process.exit(1);
+  }
+
+  // --login <provider>: run that provider's interactive login and exit without
+  // scanning. Lets you warm an auth-gated session (e.g. linkedin) before an
+  // unattended run.
+  const loginIdx = args.indexOf('--login');
+  if (loginIdx !== -1) {
+    const loginId = args[loginIdx + 1];
+    const loginProvider = loginId ? providers.get(loginId) : null;
+    if (!loginProvider || typeof loginProvider.login !== 'function') {
+      const available = [...providers.values()].filter((p) => typeof p.login === 'function').map((p) => p.id);
+      console.error(
+        `Error: --login needs a provider that supports login (${available.join(', ') || 'none loaded'}); got ${loginId ? `"${loginId}"` : 'nothing'}.`,
+      );
+      process.exit(1);
+    }
+    const ok = await loginProvider.login();
+    process.exit(ok ? 0 : 1);
   }
 
   // 2. Read portals.yml
