@@ -3,11 +3,11 @@
  * salary-gap.mjs — Desired vs Advertised vs Actual compensation analyzer
  *
  * Salary facts are append-only observations, never mutated:
- *   { tracker#, date, type: desired|advertised|actual, amount, currency, source, note }
+ *   { tracker#, date, type: desired|advertised|actual|stated, amount, currency, source, note, round, interviewer }
  *
  * Sources folded on read (one write path per fact):
  *   1. reports/{###}-*.md Machine Summary `advertised_comp`  -> advertised (source: jd)
- *   2. data/salary-observations.tsv (user-layer, append-only) -> desired/actual (+ corrections)
+ *   2. data/salary-observations.tsv (user-layer, append-only) -> desired/actual/stated (+ corrections)
  *   3. config/profile.yml compensation.target_range           -> desired default (source: profile)
  *
  * Fold: per (tracker#, type), highest trust tier wins, then latest date.
@@ -15,28 +15,34 @@
  *   desired:    user > profile
  *   advertised: user > recruiter-verbal > jd
  *
- * Aggregates grouped by (company, role) and per currency — no FX conversion.
- * Unparseable amounts, unrecognized sources, orphaned observations (tracker#
- * without report/tracker row), sample sizes, and staleness are reported loudly,
- * never dropped silently.
+ * `stated` observations are a separate, narrower-purpose log: a specific number
+ * the candidate verbally committed to, in a specific interview round, to a
+ * specific interviewer — so a later round doesn't accidentally contradict it.
+ * They carry no trust tier and never participate in the fold/gap math above;
+ * look them up with getStatedObservations() or `--stated-for <tracker#>`.
  *
  * Run: node salary-gap.mjs             (JSON)
  *      node salary-gap.mjs --summary   (human-readable)
+ *      node salary-gap.mjs --stated-for <tracker#>   (prior stated-comp observations, JSON)
  *      node salary-gap.mjs --self-test
  */
 
 import { readFileSync, existsSync, readdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
-import yaml from 'js-yaml';
+import { getCareerOpsRoot } from './path-resolver.mjs';
+import * as yaml from 'js-yaml';
+import { isMainModule } from './lib/is-main-module.mjs';
 
-const CAREER_OPS = dirname(fileURLToPath(import.meta.url));
+const CAREER_OPS = getCareerOpsRoot();
 const OBS_PATH = join(CAREER_OPS, 'data/salary-observations.tsv');
 const REPORTS_DIR = join(CAREER_OPS, 'reports');
 
 const args = process.argv.slice(2);
 const summaryMode = args.includes('--summary');
 const selfTestMode = args.includes('--self-test');
+const statedForFlagIdx = args.indexOf('--stated-for');
+const statedForNum = statedForFlagIdx !== -1 ? args[statedForFlagIdx + 1] : null;
 
 const TRUST = {
   actual: { contract: 3, 'offer-letter': 2, 'recruiter-verbal': 1, user: 0 },
@@ -44,17 +50,70 @@ const TRUST = {
   advertised: { user: 2, 'recruiter-verbal': 1, jd: 0 },
 };
 
+/**
+ * Rewrite a number's separators into a form parseFloat reads correctly.
+ *
+ * #3174 taught this file that a period can be thousands grouping ("35.000" is
+ * 35000, not 35), which is how Spain, Germany, Italy, the Netherlands and
+ * Brazil write a salary. It did that with `.replace(/,/g, '')` first, though,
+ * which silently assumes the comma is ALWAYS grouping — and in every one of
+ * those same markets the comma is the DECIMAL point. So the half of the
+ * convention that carries cents was left folding by 1000:
+ *
+ *   "45.000,00"  -> strip commas -> "45.00000" -> 45      (want 45000)
+ *   "120.000,00" -> strip commas -> "120.00000" -> 120    (want 120000)
+ *
+ * The period rule could not rescue those, because after the comma is deleted
+ * the period is followed by five digits and its "exactly three" lookahead
+ * fails. Which separator means what has to be decided BEFORE either is
+ * touched.
+ *
+ * @param {string} numStr - The numeric run, currency already stripped.
+ * @returns {string} The same number with `.` as its only separator.
+ */
+function canonicalizeSeparators(numStr) {
+  const lastComma = numStr.lastIndexOf(',');
+  const lastDot = numStr.lastIndexOf('.');
+
+  // Both present: the LAST one is the decimal separator and the other is
+  // grouping. True in both conventions, which is what makes it decidable —
+  // "45.000,00" and "123,684.50" are the same shape written two ways, and
+  // nothing else has to be guessed.
+  if (lastComma !== -1 && lastDot !== -1) {
+    const decimal = lastComma > lastDot ? ',' : '.';
+    const grouping = decimal === ',' ? '.' : ',';
+    return numStr.split(grouping).join('').replace(decimal, '.');
+  }
+
+  // Only one separator, so its role is genuinely ambiguous and is inferred
+  // from what follows it: exactly three digits and not a fourth reads as
+  // grouping ("35.000", "123,684"), anything else as a decimal point ("82.5",
+  // "45000,50"). This is #3174's rule, now applied to whichever separator is
+  // present instead of to the period alone — the comma had no rule at all and
+  // was unconditionally deleted, so "45000,50" read as 4500050.
+  //
+  // A three-place decimal ("1.250") stays ambiguous without knowing the
+  // document's locale; reading it as grouped remains the safer default for a
+  // salary field (#3174), and is now the same default in both directions.
+  const sep = lastComma !== -1 ? ',' : lastDot !== -1 ? '.' : null;
+  if (sep === null) return numStr;
+  const grouped = new RegExp(`(\\d)\\${sep}(?=\\d{3}(?!\\d))`, 'g');
+  return numStr.replace(grouped, '$1').replace(sep, '.');
+}
+
 // --- Amount parsing ---
 export function parseAmount(raw) {
   let s = String(raw ?? '').trim();
   if (!s || s === '?' || s === '-' || /^(n\/?a|null)$/i.test(s)) return null;
-  // Strip a leading currency symbol and a trailing 3-letter ISO-4217-style alpha
-  // token (any case — "450k SEK", "80-90k eur"). Exactly three letters, so the
-  // lone "k" magnitude suffix ("80k") is never eaten, and prose ("competitive")
-  // still fails the numeric match below even after losing its last three letters.
-  s = s.replace(/^[€$£¥]\s*/, '').replace(/\s*[A-Za-z]{3}\s*$/, '').trim();
+  // Strip currency symbols anywhere (US pay-transparency ranges often repeat the
+  // symbol on both bounds: "$123,684—$254,644 USD") and a trailing 3-letter
+  // ISO-4217-style alpha token (any case — "450k SEK", "80-90k eur"). Exactly
+  // three letters, so the lone "k" magnitude suffix ("80k") is never eaten, and
+  // prose ("competitive") still fails the numeric match below even after losing
+  // its last three letters.
+  s = s.replace(/[€$£¥]/g, '').replace(/\s*[A-Za-z]{3}\s*$/, '').trim();
   const toNum = (numStr, kFlag) => {
-    const n = parseFloat(numStr.replace(/,/g, ''));
+    const n = parseFloat(canonicalizeSeparators(numStr));
     return Number.isNaN(n) ? null : (kFlag ? n * 1000 : n);
   };
   const range = s.match(/^([\d.,]+)\s*(k)?\s*[-–—]\s*([\d.,]+)\s*(k)?$/i);
@@ -73,10 +132,15 @@ export function parseAmount(raw) {
   return null;
 }
 
-const VALID_TYPES = new Set(['desired', 'advertised', 'actual']);
+const VALID_TYPES = new Set(['desired', 'advertised', 'actual', 'stated']);
 
 // --- Observation log parsing (TSV) ---
-// line: {tracker#}\t{YYYY-MM-DD}\t{type}\t{amount}\t{currency}\t{source}\t{note}
+// line: {tracker#}\t{YYYY-MM-DD}\t{type}\t{amount}\t{currency}\t{source}\t{note}\t{round}\t{interviewer}
+// `round`/`interviewer` are two OPTIONAL trailing columns, meaningful only for
+// type `stated` (which round, and to whom, the number was said). Appended after
+// `note` rather than reordering the existing 7 columns, so every pre-existing
+// row in the append-only log — which has no idea these columns exist — keeps
+// parsing exactly as before (round/interviewer both default to '').
 export function parseObservations(content) {
   const out = [];
   for (const line of String(content || '').split('\n')) {
@@ -84,13 +148,24 @@ export function parseObservations(content) {
     if (!t || t.startsWith('#')) continue;
     const cells = t.split('\t');
     if (cells.length < 6) continue;
-    const [num, date, type, amount, currency, source, note = ''] = cells.map(c => c.trim());
+    const [num, date, type, amount, currency, source, note = '', round = '', interviewer = ''] = cells.map(c => c.trim());
     if (!VALID_TYPES.has(type)) continue;
     // blank currency cell -> UNKNOWN, so the fold's currency guard excludes it from
     // gap math ('' === '' would otherwise pass the strict-equality comparability check)
-    out.push({ num, date, type, amount, currency: currency ? currency.toUpperCase() : 'UNKNOWN', source, note, parsed: parseAmount(amount) });
+    out.push({ num, date, type, amount, currency: currency ? currency.toUpperCase() : 'UNKNOWN', source, note, round, interviewer, parsed: parseAmount(amount) });
   }
   return out;
+}
+
+// --- Stated-comp lookup ---
+// Returns prior `stated` observations for a tracker#, oldest first, so a later
+// round can be reminded of exactly what was already said and to whom. Deliberately
+// NOT folded/trust-ranked like desired/advertised/actual — every prior statement
+// stays visible (a candidate needs the full trail, not just the "best" one).
+export function getStatedObservations(observations, num) {
+  return observations
+    .filter(o => o.type === 'stated' && o.num === num)
+    .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
 }
 
 // Like analyze-patterns.mjs:110 but WITHOUT `json`: analyze-patterns feeds the fence
@@ -351,6 +426,26 @@ function selfTest() {
   assert(parseAmount('9ok') === null, 'typo -> null');
   assert(parseAmount('450k SEK')?.mid === 450000, 'generic trailing ISO token stripped (450k SEK)');
   assert(parseAmount('80-90k eur')?.mid === 85000, 'lowercase trailing ISO token stripped');
+  assert(parseAmount('$123,684—$254,644 USD')?.mid === 189164, 'US range, symbol on both bounds, em dash');
+  assert(parseAmount('$123,684-$254,644 USD')?.mid === 189164, 'US range, symbol on both bounds, hyphen');
+  assert(parseAmount('€80,000-€90,000')?.min === 80000, 'EUR range, symbol on both bounds');
+  assert(parseAmount('$150,000')?.mid === 150000, 'single value with symbol still works');
+  assert(parseAmount('€35.000 - €45.000')?.min === 35000 && parseAmount('€35.000 - €45.000')?.max === 45000, 'period-grouped range (#3174)');
+  assert(parseAmount('40.000')?.mid === 40000, 'period-grouped single value (#3174)');
+  assert(parseAmount('35.000 - 55.000')?.mid === 45000, 'period-grouped range, no currency symbol (#3174)');
+
+  // Decimal comma — the other half of the same convention (#3174 stripped every
+  // comma before deciding, so these folded by 1000).
+  assert(parseAmount('€45.000,00')?.mid === 45000, 'period grouping + comma decimal');
+  assert(parseAmount('120.000,00 EUR')?.mid === 120000, 'period grouping + comma decimal, trailing ISO token');
+  assert(parseAmount('45.000,50')?.mid === 45000.5, 'comma decimal keeps its cents');
+  assert(parseAmount('45000,50')?.mid === 45000.5, 'lone comma with two following digits is a decimal point');
+  assert(parseAmount('82,5k')?.mid === 82500, 'decimal k written with a comma');
+  assert(parseAmount('€1.250.000,75')?.mid === 1250000.75, 'two grouping periods + comma decimal');
+  assert(parseAmount('€40.000,00 - €55.000,00')?.mid === 47500, 'range, both bounds with comma decimals');
+  // ...and the US shape it must not have broken to get there.
+  assert(parseAmount('$123,684.50')?.mid === 123684.5, 'comma grouping + period decimal');
+  assert(parseAmount('1,250')?.mid === 1250, 'lone comma with exactly three following digits stays grouping');
 
   // parseObservations
   const obs = parseObservations(OBS_FIXTURE);
@@ -359,6 +454,29 @@ function selfTest() {
   assert(parseObservations('').length === 0, 'empty log');
   const blankCur = parseObservations('008\t2026-07-01\tactual\t91k\t\toffer-letter\tblank currency cell');
   assert(blankCur.length === 1 && blankCur[0].currency === 'UNKNOWN', 'blank currency cell -> UNKNOWN (excluded from gap math by the UNKNOWN guard)');
+
+  // backward compatibility: pre-existing rows (7 cells, no round/interviewer) still parse
+  assert(obs[0].round === '' && obs[0].interviewer === '', 'legacy 7-column row -> round/interviewer default to empty string');
+
+  // stated type: round + interviewer parse correctly on the 8th/9th columns
+  const statedFixture = [
+    '020\t2026-07-01\tstated\t90-95k\tCAD\tuser\ttold recruiter our range\tprescreen\tJane Recruiter',
+    '020\t2026-07-08\tstated\t92k\tCAD\tuser\tconfirmed same number in panel\tpanel\tJohn Manager',
+    '021\t2026-07-02\tstated\t80k\tCAD\tuser\t', // no round/interviewer at all — still valid stated obs
+  ].join('\n');
+  const statedObs = parseObservations(statedFixture);
+  assert(statedObs.length === 3, `3 stated observations, got ${statedObs.length}`);
+  assert(statedObs[0].type === 'stated' && statedObs[0].round === 'prescreen' && statedObs[0].interviewer === 'Jane Recruiter',
+    'stated observation carries round + interviewer');
+  assert(statedObs[2].round === '' && statedObs[2].interviewer === '', 'stated observation without round/interviewer defaults to empty string');
+
+  // getStatedObservations: lookup by tracker#, oldest first, other tracker#s excluded
+  const lookup020 = getStatedObservations(statedObs, '020');
+  assert(lookup020.length === 2, `2 prior stated observations for 020, got ${lookup020.length}`);
+  assert(lookup020[0].interviewer === 'Jane Recruiter' && lookup020[1].interviewer === 'John Manager',
+    'stated lookup returns oldest first');
+  assert(getStatedObservations(statedObs, '021').length === 1, '021 lookup isolated from 020');
+  assert(getStatedObservations(statedObs, '999').length === 0, 'no stated observations for untracked num -> empty array');
 
   // reportToObservation
   const r1 = reportToObservation(REPORT_FIXTURE_001, '001', '2026-06-20');
@@ -619,6 +737,17 @@ function printSummary(result) {
 function main() {
   if (selfTestMode) { selfTest(); return; }
 
+  if (statedForFlagIdx !== -1) {
+    if (!statedForNum) {
+      console.error('Usage: node salary-gap.mjs --stated-for <tracker#>');
+      process.exit(1);
+    }
+    const { observations } = collectSources();
+    const stated = getStatedObservations(observations, statedForNum);
+    console.log(JSON.stringify({ num: statedForNum, stated }, null, 2));
+    return;
+  }
+
   const { apps, observations } = collectSources();
   const result = fold(observations, apps, loadProfileDesired());
 
@@ -629,6 +758,6 @@ function main() {
   }
 }
 
-if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
+if (isMainModule(import.meta.url)) {
   main();
 }

@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -13,6 +12,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/santifer/career-ops/dashboard/internal/data"
+	"github.com/santifer/career-ops/dashboard/internal/i18n"
 	"github.com/santifer/career-ops/dashboard/internal/model"
 	"github.com/santifer/career-ops/dashboard/internal/theme"
 )
@@ -43,14 +43,6 @@ type ViewerModel struct {
 	coverLetterPath string
 	statusPicker    bool
 	statusCursor    int
-	// rawReport is the report file content exactly as read from disk. It (and
-	// the deep-research prompt extracted from it) back the clipboard-copy
-	// action so a yank reproduces the report, not the rendered/wrapped lines.
-	rawReport  string
-	deepPrompt string
-	// flash is a transient status line shown in the footer (e.g. the result of
-	// a clipboard copy). Cleared on the next keypress.
-	flash string
 }
 
 // NewViewerModel creates a new file viewer for the given path.
@@ -60,10 +52,9 @@ func NewViewerModel(t theme.Theme, careerOpsPath, path, title string, width, hei
 		content = []byte("Error reading file: " + err.Error())
 	}
 
-	raw := string(content)
 	var lines []string
 	if len(content) > 0 {
-		lines = strings.Split(raw, "\n")
+		lines = strings.Split(string(content), "\n")
 	}
 
 	m := ViewerModel{
@@ -75,8 +66,6 @@ func NewViewerModel(t theme.Theme, careerOpsPath, path, title string, width, hei
 		app:             app,
 		careerOpsPath:   careerOpsPath,
 		coverLetterPath: parseCoverLetterPath(lines, careerOpsPath),
-		rawReport:       raw,
-		deepPrompt:      extractDeepPrompt(raw),
 	}
 	m.rebuildRender()
 	return m
@@ -139,21 +128,7 @@ func (m *ViewerModel) Resize(width, height int) {
 
 func (m ViewerModel) Update(msg tea.Msg) (ViewerModel, tea.Cmd) {
 	switch msg := msg.(type) {
-	case viewerCopyResultMsg:
-		switch {
-		case msg.err != nil:
-			m.flash = "Copy failed: " + msg.err.Error()
-		case msg.withPrompt:
-			m.flash = "Copied deep prompt + evaluation to clipboard"
-		default:
-			m.flash = "Copied evaluation to clipboard (no deep prompt in report)"
-		}
-		return m, nil
-
 	case tea.KeyMsg:
-		// Any keystroke dismisses a lingering flash so it never sticks around
-		// past the action that produced it.
-		m.flash = ""
 		if m.statusPicker {
 			return m.handleStatusPicker(msg)
 		}
@@ -161,29 +136,11 @@ func (m ViewerModel) Update(msg tea.Msg) (ViewerModel, tea.Cmd) {
 		case "q", "esc":
 			return m, func() tea.Msg { return ViewerClosedMsg{} }
 
-		case "y":
-			// Yank the report to the clipboard. When the report embeds a
-			// deep-research prompt (score cleared the threshold at eval time),
-			// the prompt leads and the evaluation follows as context.
-			payload, withPrompt := m.clipboardPayload()
-			if strings.TrimSpace(payload) == "" {
-				m.flash = "Nothing to copy"
-				return m, nil
-			}
-			return m, func() tea.Msg {
-				return viewerCopyResultMsg{withPrompt: withPrompt, err: copyToClipboard(payload)}
-			}
-
 		case "c":
 			m.statusPicker = true
+			// The picker's own current-status-first reordering (see
+			// getStatusPairs) always places this row's status at index 0.
 			m.statusCursor = 0
-			currentNorm := data.NormalizeStatus(m.app.Status)
-			for idx, opt := range statusOptions {
-				if data.NormalizeStatus(opt) == currentNorm {
-					m.statusCursor = idx
-					break
-				}
-			}
 			m.clampScrollOffset()
 			return m, nil
 
@@ -248,7 +205,7 @@ func (m ViewerModel) Update(msg tea.Msg) (ViewerModel, tea.Cmd) {
 func (m ViewerModel) bodyHeight() int {
 	h := m.height - 4 // header + footer + padding
 	if m.statusPicker {
-		h -= (len(statusOptions) + 1)
+		h -= (len(m.currentStatusPairs()) + 1)
 	}
 	if h < 3 {
 		h = 3
@@ -755,27 +712,18 @@ func (m ViewerModel) renderFooter() string {
 
 	if m.statusPicker {
 		return style.Render(
-			keyStyle.Render("↑/↓/j/k") + descStyle.Render(" select  ") +
-				keyStyle.Render("Enter") + descStyle.Render(" confirm  ") +
-				keyStyle.Render("Esc/q") + descStyle.Render(" cancel"))
+			keyStyle.Render("↑/↓/j/k") + descStyle.Render(i18n.Current.HelpNav) +
+				keyStyle.Render("Enter") + descStyle.Render(i18n.Current.HelpConfirm) +
+				keyStyle.Render("Esc/q") + descStyle.Render(i18n.Current.HelpCancel))
 	}
 
-	// A pending flash (e.g. clipboard-copy result) takes over the footer until
-	// the next keystroke clears it.
-	if m.flash != "" {
-		flashStyle := lipgloss.NewStyle().Bold(true).Foreground(m.theme.Green)
-		if strings.HasPrefix(m.flash, "Copy failed") {
-			flashStyle = flashStyle.Foreground(m.theme.Red)
-		}
-		return style.Render(flashStyle.Render(m.flash))
-	}
-
-	footer := keyStyle.Render("↑↓") + descStyle.Render(" scroll  ") +
-		keyStyle.Render("PgUp/Dn") + descStyle.Render(" page  ") +
-		keyStyle.Render("g/G") + descStyle.Render(" top/end  ") +
-		keyStyle.Render("c") + descStyle.Render(" status  ") +
-		keyStyle.Render("y") + descStyle.Render(" copy  ") +
-		keyStyle.Render("Esc") + descStyle.Render(" back")
+	// Render standard footer shortcuts
+	footer := keyStyle.Render("↑↓") + descStyle.Render(i18n.Current.HelpScroll) + // nav
+		keyStyle.Render("PgUp/Dn") + descStyle.Render(i18n.Current.HelpPage) + // pagination
+		keyStyle.Render("g/G") + descStyle.Render(i18n.Current.HelpTopEnd) + // top/bottom
+		keyStyle.Render("c") + descStyle.Render(i18n.Current.HelpChange) + // status
+		keyStyle.Render("t") + descStyle.Render(i18n.Current.HelpLanguage) + // language
+		keyStyle.Render("Esc") + descStyle.Render(i18n.Current.HelpBack) // exit
 
 	if m.coverLetterPath != "" {
 		footer += "  " + keyStyle.Render("L") + descStyle.Render(" cover letter")
@@ -793,8 +741,8 @@ func (m ViewerModel) handleStatusPicker(msg tea.KeyMsg) (ViewerModel, tea.Cmd) {
 
 	case "down", "j":
 		m.statusCursor++
-		if m.statusCursor >= len(statusOptions) {
-			m.statusCursor = len(statusOptions) - 1
+		if m.statusCursor >= len(m.currentStatusPairs()) {
+			m.statusCursor = len(m.currentStatusPairs()) - 1
 		}
 
 	case "up", "k":
@@ -806,7 +754,7 @@ func (m ViewerModel) handleStatusPicker(msg tea.KeyMsg) (ViewerModel, tea.Cmd) {
 	case "enter":
 		m.statusPicker = false
 		m.clampScrollOffset()
-		newStatus := statusOptions[m.statusCursor]
+		newStatus := m.currentStatusPairs()[m.statusCursor].Canonical
 		return m, func() tea.Msg {
 			return ViewerUpdateStatusMsg{
 				App:       m.app,
@@ -827,55 +775,32 @@ func (m ViewerModel) overlayStatusPicker(body string) string {
 		Bold(true)
 
 	var picker []string
-	picker = append(picker, padStyle.Render(borderStyle.Render("Change status:")))
+	picker = append(picker, padStyle.Render(borderStyle.Render(i18n.Current.PickerChangeStatus)))
 
-	for i, opt := range statusOptions {
+	for i, pair := range m.currentStatusPairs() {
 		style := lipgloss.NewStyle().Foreground(m.theme.Text).Width(pickerWidth)
 		if i == m.statusCursor {
 			style = style.Background(m.theme.Overlay).Bold(true)
 		}
 		prefix := "  "
 		if i == m.statusCursor {
-			prefix = "> "
+			prefix = " >"
 		}
-		picker = append(picker, padStyle.Render(style.Render(prefix+opt)))
+		picker = append(picker, padStyle.Render(prefix+style.Render(pair.Display)))
 	}
 
 	bodyLines = append(bodyLines, picker...)
 	return strings.Join(bodyLines, "\n")
 }
 
+// currentStatusPairs resolves the status-change picker options for the
+// application currently open in the viewer, so the picker leads with this
+// row's own status (see getStatusPairs).
+func (m ViewerModel) currentStatusPairs() []StatusPair {
+	return getStatusPairs(data.NormalizeStatus(m.app.Status))
+}
+
 // UpdateAppStatus updates the status of the current application inside the viewer model.
 func (m *ViewerModel) UpdateAppStatus(newStatus string) {
 	m.app.Status = newStatus
-}
-
-// wordWrap performs greedy word-wrap: pack as many whitespace-separated words
-// as fit within width (measured in runes) onto each line before breaking.
-func wordWrap(text string, width int) []string {
-	words := strings.Fields(text)
-	if len(words) == 0 {
-		return []string{text}
-	}
-	var lines []string
-	var current strings.Builder
-	for _, w := range words {
-		if current.Len() == 0 {
-			current.WriteString(w)
-			continue
-		}
-		runeLen := utf8.RuneCountInString(current.String()) + 1 + utf8.RuneCountInString(w)
-		if runeLen <= width {
-			current.WriteByte(' ')
-			current.WriteString(w)
-		} else {
-			lines = append(lines, current.String())
-			current.Reset()
-			current.WriteString(w)
-		}
-	}
-	if current.Len() > 0 {
-		lines = append(lines, current.String())
-	}
-	return lines
 }
