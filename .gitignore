@@ -88,3 +88,4 @@ plan/
 tmp/
 batch/tmp/
 batch/pipeline-worker-*.md
+.tmp-*
