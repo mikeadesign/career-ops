@@ -11,6 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/santifer/career-ops/dashboard/internal/data"
+	"github.com/santifer/career-ops/dashboard/internal/i18n"
 	"github.com/santifer/career-ops/dashboard/internal/model"
 	"github.com/santifer/career-ops/dashboard/internal/theme"
 	"github.com/santifer/career-ops/dashboard/internal/ui/screens"
@@ -22,16 +23,20 @@ const (
 	viewPipeline viewState = iota
 	viewReport
 	viewProgress
+	viewStats
 )
 
 type appModel struct {
 	pipeline        screens.PipelineModel
 	viewer          screens.ViewerModel
 	progress        screens.ProgressModel
+	stats           screens.StatsModel
 	state           viewState
 	careerOpsPath   string
 	theme           theme.Theme
 	progressMetrics model.ProgressMetrics
+	statsMetrics    model.StatsMetrics
+	evaluatedCount  int
 }
 
 func (m *appModel) reloadPipelineData() {
@@ -39,13 +44,54 @@ func (m *appModel) reloadPipelineData() {
 	metrics := data.ComputeMetrics(apps)
 	m.progressMetrics = data.ComputeProgressMetrics(apps)
 	m.pipeline = m.pipeline.WithReloadedData(apps, metrics)
+	enrichArchetypes(m.careerOpsPath, apps, &m.pipeline)
+	m.statsMetrics = data.ComputeStatsMetrics(apps)
+	// Count only apps with a score so the header reflects evaluated offers.
+	m.evaluatedCount = 0
+	for _, a := range apps {
+		if a.Score > 0 {
+			m.evaluatedCount++
+		}
+	}
+}
+
+// enrichArchetypes lazy-loads each app's report-derived archetype (used by
+// the stats screen's breakdown table) and, as a side effect, primes the
+// pipeline model's report preview cache the same way main()'s startup loop
+// does — so a manual refresh doesn't blank out report previews.
+func enrichArchetypes(careerOpsPath string, apps []model.CareerApplication, pm *screens.PipelineModel) {
+	for i := range apps {
+		if apps[i].ReportPath == "" {
+			continue
+		}
+		archetype, tldr, remote, comp := data.LoadReportSummary(careerOpsPath, apps[i].ReportPath)
+		// Only overwrite when the report actually supplies a non-empty archetype;
+		// preserve any value already derived from the tracker.
+		if archetype != "" {
+			apps[i].Archetype = archetype
+		}
+		if archetype != "" || tldr != "" || remote != "" || comp != "" {
+			pm.EnrichReport(apps[i].ReportPath, archetype, tldr, remote, comp)
+		}
+	}
 }
 
 func (m appModel) Init() tea.Cmd {
 	return nil
 }
 
+// Update manages global app state and routes incoming messages to active screens.
 func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		switch keyMsg.String() {
+		case "t", "T":
+			// Toggle language globally, unless the user is actively typing in a text input field
+			if !(m.state == viewPipeline && m.pipeline.IsTextInputActive()) {
+				i18n.ToggleLang()
+			}
+		}
+	}
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.pipeline.Resize(msg.Width, msg.Height)
@@ -54,6 +100,9 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.state == viewProgress {
 			m.progress.Resize(msg.Width, msg.Height)
+		}
+		if m.state == viewStats {
+			m.stats.Resize(msg.Width, msg.Height)
 		}
 		pm, cmd := m.pipeline.Update(msg)
 		m.pipeline = pm
@@ -77,9 +126,10 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case screens.PipelineUpdateStatusAndNotesMsg:
-		err := data.UpdateApplicationStatusAndNotes(msg.CareerOpsPath, msg.App, msg.NewStatus, msg.NewNotes)
+		// Issue 1380: atomic status + notes write from the discard reason picker.
+		err := data.UpdateApplicationStatusAndNotes(msg.CareerOpsPath, msg.App, msg.NewStatus, msg.NotesAppend)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "WARN: status and notes update failed: %v\n", err)
+			fmt.Fprintf(os.Stderr, "WARN: status+notes update failed: %v\n", err)
 		}
 		m.reloadPipelineData()
 		return m, nil
@@ -143,7 +193,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case screens.PipelineOpenProgressMsg:
 		m.progress = screens.NewProgressModel(
-			theme.NewTheme("catppuccin-mocha"),
+			m.theme,
 			m.progressMetrics,
 			m.pipeline.Width(), m.pipeline.Height(),
 		)
@@ -151,6 +201,20 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case screens.ProgressClosedMsg:
+		m.state = viewPipeline
+		return m, nil
+
+	case screens.PipelineOpenStatsMsg:
+		m.stats = screens.NewStatsModel(
+			m.theme,
+			m.statsMetrics,
+			m.evaluatedCount,
+			m.pipeline.Width(), m.pipeline.Height(),
+		)
+		m.state = viewStats
+		return m, nil
+
+	case screens.StatsClosedMsg:
 		m.state = viewPipeline
 		return m, nil
 
@@ -174,6 +238,11 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.progress = pg
 			return m, cmd
 		}
+		if m.state == viewStats {
+			sm, cmd := m.stats.Update(msg)
+			m.stats = sm
+			return m, cmd
+		}
 		pm, cmd := m.pipeline.Update(msg)
 		m.pipeline = pm
 		return m, cmd
@@ -185,7 +254,10 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func openCmd(target string) tea.Cmd {
 	return func() tea.Msg {
 		if err := openWithDefaultApp(target); err != nil {
-			fmt.Fprintf(os.Stderr, "WARN: failed to open %q: %v\n", target, err)
+			// Issue 3913: the dashboard runs with tea.WithAltScreen(), so a
+			// message on stderr is never visible. Report the failure back to
+			// the pipeline screen, which flashes it in the help bar.
+			return screens.PipelineOpenFailedMsg{Target: target, Err: err.Error()}
 		}
 		return nil
 	}
@@ -237,14 +309,67 @@ func (m appModel) View() string {
 		return m.viewer.View()
 	case viewProgress:
 		return m.progress.View()
+	case viewStats:
+		return m.stats.View()
 	default:
 		return m.pipeline.View()
 	}
 }
 
+func getRepoRoot() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "."
+	}
+	if _, err := os.Stat(filepath.Join(cwd, "path-resolver.mjs")); err == nil {
+		return cwd
+	}
+	parent := filepath.Dir(cwd)
+	if _, err := os.Stat(filepath.Join(parent, "path-resolver.mjs")); err == nil {
+		return parent
+	}
+	return cwd
+}
+
+func resolveEnvPath(envVal string) string {
+	trimmed := strings.TrimSpace(envVal)
+	if trimmed == "" {
+		return ""
+	}
+	if filepath.IsAbs(trimmed) {
+		return filepath.Clean(trimmed)
+	}
+	return filepath.Clean(filepath.Join(getRepoRoot(), trimmed))
+}
+
 func main() {
-	pathFlag := flag.String("path", ".", "Path to career-ops directory")
+	defaultPath := getRepoRoot()
+	if envPath := resolveEnvPath(os.Getenv("CAREER_OPS_ROOT")); envPath != "" {
+		defaultPath = envPath
+	} else if envPath := resolveEnvPath(os.Getenv("CAREER_OPS_DATA_DIR")); envPath != "" {
+		defaultPath = envPath
+	} else {
+		markerFile := filepath.Join(getRepoRoot(), ".career-ops-data")
+		if content, err := os.ReadFile(markerFile); err == nil {
+			trimmed := strings.TrimSpace(string(content))
+			if trimmed != "" {
+				if filepath.IsAbs(trimmed) {
+					defaultPath = filepath.Clean(trimmed)
+				} else {
+					defaultPath = filepath.Clean(filepath.Join(getRepoRoot(), trimmed))
+				}
+			}
+		}
+	}
+	pathFlag := flag.String("path", defaultPath, "Path to career-ops directory")
+	langFlag := flag.String("lang", "", "Language for UI (en, tr). Defaults to auto-detect/en.")
 	flag.Parse()
+
+	if *langFlag != "" {
+		i18n.SetLang(*langFlag)
+	} else if os.Getenv("LANG") != "" {
+		i18n.SetLang(os.Getenv("LANG"))
+	}
 
 	careerOpsPath := *pathFlag
 
@@ -263,21 +388,24 @@ func main() {
 	t := theme.NewTheme("auto")
 	pm := screens.NewPipelineModel(t, apps, metrics, careerOpsPath, 120, 40)
 
-	for _, app := range apps {
-		if app.ReportPath == "" {
-			continue
-		}
-		archetype, tldr, remote, comp := data.LoadReportSummary(careerOpsPath, app.ReportPath)
-		if archetype != "" || tldr != "" || remote != "" || comp != "" {
-			pm.EnrichReport(app.ReportPath, archetype, tldr, remote, comp)
-		}
-	}
+	enrichArchetypes(careerOpsPath, apps, &pm)
+	statsMetrics := data.ComputeStatsMetrics(apps)
 
 	m := appModel{
 		pipeline:        pm,
 		careerOpsPath:   careerOpsPath,
 		theme:           t,
 		progressMetrics: progressMetrics,
+		statsMetrics:    statsMetrics,
+		evaluatedCount:  func() int {
+			n := 0
+			for _, a := range apps {
+				if a.Score > 0 {
+					n++
+				}
+			}
+			return n
+		}(),
 	}
 
 	p := tea.NewProgram(m, tea.WithAltScreen())
