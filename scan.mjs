@@ -2818,19 +2818,20 @@ function guardStatusFor(code) {
 const KNOWN_FLAGS = [
   '--dry-run', '--verify', '--headed-fallback', '--throttle', '--rediscover-404',
   '--include-blacklisted', '--company', '--posted-after', '--posted-before',
-  '--since', '--quiet', '--json', '--help', '-h',
+  '--since', '--quiet', '--json', '--help', '-h', '--login',
 ];
 
 // Flags whose space-separated value is the NEXT argv token (the `--flag=value`
 // form is self-contained and never needs this). --throttle is deliberately
 // excluded: only its bare and `--throttle=<ms>` forms are read below, so a
 // following token is never its value.
-const VALUE_FLAGS = ['--company', '--posted-after', '--posted-before', '--since'];
+const VALUE_FLAGS = ['--company', '--posted-after', '--posted-before', '--since', '--login'];
 
 const USAGE = `Usage:
   node scan.mjs                              # scan all enabled companies
   node scan.mjs --dry-run                    # preview without writing files
   node scan.mjs --company Cohere             # scan a single company
+  node scan.mjs --login linkedin             # log in to an auth-gated provider and exit (no scan)
   node scan.mjs --verify                     # Playwright-check each new URL; drop expired postings
   node scan.mjs --verify --headed-fallback   # retry anti-bot-blocked URLs in a headed browser (needs a display)
   node scan.mjs --verify --throttle          # jittered ~5-10s gap between checks (stay under rate limits)
