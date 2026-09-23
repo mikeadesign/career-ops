@@ -3407,6 +3407,25 @@ async function main() {
     }
   }
 
+  // Providers that hold a resource across the run (e.g. linkedin.mjs's
+  // persistent Chromium context, launched by ensureSession()'s session check
+  // even when that check fails and the fetch never runs) must release it
+  // before main() returns. Nothing else calls this: `fetch()` only closes its
+  // own page, not the shared context, and a `--login`-only invocation exits
+  // via a separate path above. Without this, the leftover browser process
+  // keeps an open handle that stops Node's event loop from ever going empty,
+  // so the process hangs indefinitely after printing all its output instead
+  // of exiting. Best-effort and isolated per provider so one cleanup failure
+  // can't mask the scan's real results or block the others from running.
+  for (const provider of providers.values()) {
+    if (typeof provider.cleanup !== 'function') continue;
+    try {
+      await provider.cleanup();
+    } catch (err) {
+      console.error(`Warning: ${provider.id ?? '(unknown provider)'} cleanup failed: ${err.message}`);
+    }
+  }
+
   // 7. Print summary
   printScanSummaryHeader('Portal Scan', date);
   const summaryCompanies = targets.filter(t => !t._isBoard).length;
