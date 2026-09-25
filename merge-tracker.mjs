@@ -88,11 +88,8 @@ function loadFailedReportNumbers(path) {
     const status = cols[2];
     const reportNum = cols[5];
     if (status === 'failed' && reportNum && reportNum !== '-') {
-      // Digits only, positive, safe: parseInt would accept "12abc" and
-      // 9007199254740992, and an unsafe number in the occupied set makes
-      // reserveReportNumbers throw "No safe report-number range remains".
-      const n = /^\d+$/.test(reportNum) ? Number(reportNum) : NaN;
-      if (Number.isSafeInteger(n) && n > 0) failed.add(n);
+      const n = parseInt(reportNum, 10);
+      if (!isNaN(n)) failed.add(n);
     }
   }
   return failed;
@@ -1536,28 +1533,15 @@ for (const file of tsvFiles) {
       if (COLMAP.via == null
           && (String(addition.company).trim() === '?' || String(app.company).trim() === '?')
           && normalizeVia(addition.via || '') !== normalizeVia(app.via || '')) return false;
-      // Req/job-number guard (#1524, widened by #4275): a similarly-worded
-      // title at the same company can still be a genuinely distinct posting
-      // when a req/job number in the Notes column proves it (employers like
-      // TD commonly run concurrent near-identical L&D/HR titles distinguished
-      // only by req#). Originally this only counted when BOTH sides carried
-      // an extractable number and they disagreed — an existing row written
-      // before req numbers were consistently captured has none, so a new
-      // addition FOR A GENUINELY DIFFERENT POSTING that happens to have a req
-      // number fell through to "not proven distinct" and got silently merged,
-      // corrupting the old row's date/score/report/notes.
-      //
-      // The fix is direction-sensitive, not symmetric: only block when the
-      // ADDITION carries a number the existing row can't confirm or deny.
-      // The other direction — existing row has a req number, addition does
-      // not — is the ordinary re-evaluation shape (a fresh TSV re-scoring the
-      // same posting typically writes new commentary like "re-scored: JD
-      // refreshed" without repeating the req number already sitting in the
-      // row's Notes) and must keep merging; blocking that direction too would
-      // turn every such re-eval into a spurious duplicate row instead.
+      // Req/job-number guard (#1524): a similarly-worded title at the same
+      // company can still be a genuinely distinct posting when a req/job
+      // number in the Notes column proves it (employers like TD commonly run
+      // concurrent near-identical L&D/HR titles distinguished only by req#).
+      // Only treat this as evidence the rows differ when BOTH sides carry an
+      // extractable number and they disagree — if either side has none, fall
+      // back to today's fuzzy-match-only behavior unchanged.
       const appReqNum = extractReqNumber(app.notes);
       if (additionReqNum && appReqNum && additionReqNum !== appReqNum) return false;
-      if (additionReqNum && !appReqNum) return false;
       return true;
     };
     duplicate = existingApps.find(app => fuzzyTierMatch(app, false))

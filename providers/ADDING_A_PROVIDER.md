@@ -114,11 +114,10 @@ file's header comment must name the target list (reference:
 
 ### SSRF hardening
 
-- `fetchJson` / `fetchText` / `fetchResponse` refuse redirects by default
-  (`redirect: 'error'`): a server-side redirect could point the request at an
-  internal address after the IP guard already passed the original host. Never
-  pass `redirect: 'follow'` in a provider; if a portal genuinely moved, fix
-  the URL instead.
+- Always pass `redirect: 'error'` to `fetchJson` / `fetchText`. `_http.mjs`
+  defaults to `redirect: 'follow'` by design — that is not a safe default
+  for a provider, since a server-side redirect could point the request at an
+  internal address.
 - If the final URL is built from `portals.yml` data (`entry.api`,
   `entry.careers_url`), check the hostname against an allowlist **before**
   any network call. Reference: `assertGreenhouseUrl` in
