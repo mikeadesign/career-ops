@@ -1378,6 +1378,13 @@ search_queries:
 #   appendWorkType: true  # optional: title becomes "Strategy Consultant [Part time]"
 #   enabled: true
 #
+# - name: Accenture US                  # accenture.com careers search API
+#   provider: accenture
+#   accenture:
+#     country: USA                        # optional (default USA)
+#     site: us-en                         # optional URL locale (default us-en)
+#   enabled: true
+#
 # - name: IBM — Germany SWE              # IBM global careers
 #   provider: ibm
 #   ibm:

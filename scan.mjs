@@ -24,6 +24,7 @@
  *   node scan.mjs                  # scan all enabled companies
  *   node scan.mjs --dry-run        # preview without writing files
  *   node scan.mjs --company Cohere # scan a single company
+ *   node scan.mjs --login linkedin # log in to an auth-gated provider and exit (no scan)
  *   node scan.mjs --verify         # Playwright-check each new URL; drop expired postings
  *   node scan.mjs --verify --headed-fallback  # retry anti-bot-blocked URLs in a headed browser (needs a display)
  *   node scan.mjs --verify --throttle          # jittered ~5-10s gap between checks (stay under rate limits)
@@ -2563,8 +2564,14 @@ Paste job URLs below as \`- [ ] {url}\` then run \`/career-ops pipeline\`.
 
 // Current section names (English). Legacy Spanish names are checked as fallback
 // so existing pipeline.md files created before this change keep working.
-const PENDING_MARKERS = ['## Pending', '## Pendientes'];
-const PROCESSED_MARKERS = ['## Processed', '## Procesadas'];
+//
+// Matched as a line-exact header, not a raw substring search — an archived
+// "## Filtered (mid-...)" block can contain a restore-instruction comment
+// that literally says "move lines back to ## Pending", and a substring match
+// on that text previously caused new offers to be inserted into the wrong
+// (archived) section instead of the real Pending section.
+const PENDING_HEADER_RE = /^##[ \t]+(?:Pending|Pendientes)[ \t]*$/m;
+const PROCESSED_HEADER_RE = /^##[ \t]+(?:Processed|Procesadas)[ \t]*$/m;
 
 // Locked (pipeline-lock.mjs) so scan.mjs, scan-ats-full.mjs, and plugins.mjs
 // (pipeline mode) — the three current callers — can never interleave their
@@ -2580,21 +2587,18 @@ export async function appendToPipeline(offers, { pipelinePath = PIPELINE_PATH } 
       ? readFileSync(pipelinePath, 'utf-8')
       : PIPELINE_SKELETON;
 
-    const marker = PENDING_MARKERS.find(m => text.includes(m)) ?? null;
-    const idx = marker !== null ? text.indexOf(marker) : -1;
+    const pendingMatch = PENDING_HEADER_RE.exec(text);
+    const idx = pendingMatch ? pendingMatch.index : -1;
 
     if (idx === -1) {
       // No Pending section found — insert one before Processed (or at end)
-      const procIdx = PROCESSED_MARKERS.reduce((found, m) => {
-        const i = text.indexOf(m);
-        return (found === -1 || (i !== -1 && i < found)) ? i : found;
-      }, -1);
-      const insertAt = procIdx === -1 ? text.length : procIdx;
+      const processedMatch = PROCESSED_HEADER_RE.exec(text);
+      const insertAt = processedMatch ? processedMatch.index : text.length;
       const block = `\n## Pending\n\n` + offers.map(formatPipelineOffer).join('\n') + '\n\n';
       text = text.slice(0, insertAt) + block + text.slice(insertAt);
     } else {
       // Find the end of existing Pending content (next ## or end)
-      const afterMarker = idx + marker.length;
+      const afterMarker = idx + pendingMatch[0].length;
       const nextSection = text.indexOf('\n## ', afterMarker);
       const insertAt = nextSection === -1 ? text.length : nextSection;
 
@@ -3102,19 +3106,20 @@ function guardStatusFor(code) {
 const KNOWN_FLAGS = [
   '--dry-run', '--verify', '--headed-fallback', '--throttle', '--rediscover-404',
   '--include-blacklisted', '--company', '--posted-after', '--posted-before',
-  '--since', '--quiet', '--json', '--help', '-h',
+  '--since', '--quiet', '--json', '--help', '-h', '--login',
 ];
 
 // Flags whose space-separated value is the NEXT argv token (the `--flag=value`
 // form is self-contained and never needs this). --throttle is deliberately
 // excluded: only its bare and `--throttle=<ms>` forms are read below, so a
 // following token is never its value.
-const VALUE_FLAGS = ['--company', '--posted-after', '--posted-before', '--since'];
+const VALUE_FLAGS = ['--company', '--posted-after', '--posted-before', '--since', '--login'];
 
 const USAGE = `Usage:
   node scan.mjs                              # scan all enabled companies
   node scan.mjs --dry-run                    # preview without writing files
   node scan.mjs --company Cohere             # scan a single company
+  node scan.mjs --login linkedin             # log in to an auth-gated provider and exit (no scan)
   node scan.mjs --verify                     # Playwright-check each new URL; drop expired postings
   node scan.mjs --verify --headed-fallback   # retry anti-bot-blocked URLs in a headed browser (needs a display)
   node scan.mjs --verify --throttle          # jittered ~5-10s gap between checks (stay under rate limits)
@@ -3220,6 +3225,24 @@ async function main() {
   if (providers.size === 0) {
     console.error('Error: no providers loaded from providers/');
     process.exit(1);
+  }
+
+  // --login <provider>: run that provider's interactive login and exit without
+  // scanning. Lets you warm an auth-gated session (e.g. linkedin) before an
+  // unattended run.
+  const loginIdx = args.indexOf('--login');
+  if (loginIdx !== -1) {
+    const loginId = args[loginIdx + 1];
+    const loginProvider = loginId ? providers.get(loginId) : null;
+    if (!loginProvider || typeof loginProvider.login !== 'function') {
+      const available = [...providers.values()].filter((p) => typeof p.login === 'function').map((p) => p.id);
+      console.error(
+        `Error: --login needs a provider that supports login (${available.join(', ') || 'none loaded'}); got ${loginId ? `"${loginId}"` : 'nothing'}.`,
+      );
+      process.exit(1);
+    }
+    const ok = await loginProvider.login();
+    process.exit(ok ? 0 : 1);
   }
 
   // 2. Read portals.yml
@@ -3652,6 +3675,25 @@ async function main() {
     }
     for (const [status, group] of byStatus) {
       await appendToScanHistory(group, date, status);
+    }
+  }
+
+  // Providers that hold a resource across the run (e.g. linkedin.mjs's
+  // persistent Chromium context, launched by ensureSession()'s session check
+  // even when that check fails and the fetch never runs) must release it
+  // before main() returns. Nothing else calls this: `fetch()` only closes its
+  // own page, not the shared context, and a `--login`-only invocation exits
+  // via a separate path above. Without this, the leftover browser process
+  // keeps an open handle that stops Node's event loop from ever going empty,
+  // so the process hangs indefinitely after printing all its output instead
+  // of exiting. Best-effort and isolated per provider so one cleanup failure
+  // can't mask the scan's real results or block the others from running.
+  for (const provider of providers.values()) {
+    if (typeof provider.cleanup !== 'function') continue;
+    try {
+      await provider.cleanup();
+    } catch (err) {
+      console.error(`Warning: ${provider.id ?? '(unknown provider)'} cleanup failed: ${err.message}`);
     }
   }
 

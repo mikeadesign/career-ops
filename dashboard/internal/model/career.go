@@ -122,3 +122,17 @@ type PayStats struct {
 	MedianPayMax float64
 	MaxPayMax    float64
 }
+
+// Task represents a follow-up task row from data/tasks.md.
+type Task struct {
+	Number    int
+	Created   string
+	Due       string
+	AppNumber int    // 0 if unattached
+	Company   string
+	Type      string // followup | contact | interview | manual
+	Title     string
+	Status    string // pending | done | skipped
+	Completed string
+	Notes     string
+}
