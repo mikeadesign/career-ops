@@ -30,6 +30,7 @@ These files contain your personal data, customizations, and work product. Update
 | `plugins.local/` | Your own / private plugins (never auto-updated) |
 | `plugins.lock` | Integrity pins + recorded consent for your enabled plugins (generated; never auto-updated) |
 | `data/applications.md` | Your application tracker (source of truth) |
+| `data/career-profile.yml` | Your source-backed Master Career Profile; written only after explicit review of imported CV facts |
 | `data/applications.db` | Derived query index over `applications.md` (SQLite, rebuilt by `node tracker.mjs sync` — safe to delete) |
 | `data/pipeline.md` | Your URL inbox |
 | `data/scan-history.tsv` | Your scan history (tab-separated, append-only trailing columns; col 8: local SimHash JD fingerprint for cross-listing detection, col 9: posting date, cols 10-11: trust score/flags, col 12: normalized company key for repost/name matching). Older rows may have fewer columns — readers index by position and tolerate the absence. |
@@ -60,7 +61,7 @@ These files contain your personal data, customizations, and work product. Update
 
 The two lists above describe *this project*. A fork usually carries files the project has never heard of — a nightly runner, an `.mcp.json`, a private fixtures directory. Those files are in the user layer by every definition that matters, but they cannot be added to `USER_PATHS`: that array lives in `update-system.mjs`, which `apply` overwrites and which git re-merges on every sync. The declaration would be erased by the process it exists to constrain.
 
-`config/local-paths.txt` moves the declaration outside that blast radius. It is gitignored, read at runtime, and merged into the user layer for both the updater's safety check and `validate-system-paths-coverage.mjs`:
+`config/local-paths.txt` moves the declaration outside that blast radius. It is gitignored by default, read at runtime, and merged into the user layer for both the updater's safety check and `validate-system-paths-coverage.mjs`:
 
 ```text
 # one repo-relative path per line; blank lines and # comments ignored
@@ -77,7 +78,7 @@ Three declarations are refused, loudly, naming the entry:
 |---------|-----|
 | An absolute path, or one containing `..` | Would extend "never touch" over files outside the checkout |
 | A path the system layer already ships | The file would silently stop receiving updates, with no other signal that it had been frozen |
-| `config/local-paths.txt` itself | It is gitignored, so nothing updates it; listing it protects against a threat that does not exist and reads as though it did |
+| `config/local-paths.txt` itself | It is gitignored by default, so nothing updates it; listing it protects against a threat that does not exist and reads as though it did. A fork whose CI runs the suite un-ignores and commits it (see `config/local-paths.example.txt`); it is then tracked and not ignored, which both guards accept |
 
 ## System Layer (safe to auto-update)
 
