@@ -31,7 +31,7 @@ async function fetchWithTimeout(url, opts = {}, consume) {
 // server-side redirect could point the request at a private address after the
 // ip guard already passed the original host (#4079). Callers that really need
 // to follow redirects opt in explicitly.
-async function fetchInContext(url, { timeoutMs = DEFAULT_TIMEOUT_MS, headers = {}, method = 'GET', body = null, redirect = 'error', onResponse } = {}, consume) {
+async function fetchInContext(url, { timeoutMs = DEFAULT_TIMEOUT_MS, headers = {}, method = 'GET', body = null, redirect = 'error', onResponse, passRedirects = false } = {}, consume) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -56,7 +56,7 @@ async function fetchInContext(url, { timeoutMs = DEFAULT_TIMEOUT_MS, headers = {
       signal: controller.signal,
     });
     onResponse?.(res);
-    if (!res.ok) {
+    if (!res.ok && !(passRedirects && res.status >= 300 && res.status < 400)) {
       const responseText = await res.text().catch(() => '');
       // WAF/CDN challenge pages (seen live: Workday 429s) carry no actionable
       // text — HTML markup or a generic interstitial message, not worth
@@ -149,7 +149,11 @@ export async function fetchText(url, opts = {}) {
 // Set-Cookie (getSetCookie()), survives the reconstruction.
 const NULL_BODY_STATUSES = new Set([204, 205, 304]);
 export async function fetchResponse(url, opts = {}) {
-  return await fetchWithTimeout(url, opts, async (res) => {
+  // Under redirect:'manual' the caller walks the redirect chain itself
+  // (peoplesoft re-validates each hop against its origin), so a 3xx is a
+  // result to hand back, not an error.
+  const passRedirects = opts.redirect === 'manual';
+  return await fetchWithTimeout(url, { ...opts, passRedirects }, async (res) => {
     const body = NULL_BODY_STATUSES.has(res.status) ? null : await res.text();
     return new Response(body, { status: res.status, statusText: res.statusText, headers: res.headers });
   });
@@ -335,6 +339,19 @@ export async function fetchJsonWithRetry(ctx, url, opts = {}, policy = {}) {
  */
 export async function fetchTextWithRetry(ctx, url, opts = {}, policy = {}) {
   return withRetry(() => ctx.fetchText(url, opts), ctx, policy);
+}
+
+/**
+ * Fetch a Response (headers preserved) with bounded retry on transient failures.
+ *
+ * @param {{fetchResponse: Function, sleep?: Function}} ctx - Transport context.
+ * @param {string} url - Absolute URL.
+ * @param {object} [opts] - Passed through to ctx.fetchResponse.
+ * @param {{retries?: number, baseDelayMs?: number, maxDelayMs?: number}} [policy]
+ * @returns {Promise<Response>}
+ */
+export async function fetchResponseWithRetry(ctx, url, opts = {}, policy = {}) {
+  return withRetry(() => ctx.fetchResponse(url, opts), ctx, policy);
 }
 
 export function makeHttpCtx(observer) {
