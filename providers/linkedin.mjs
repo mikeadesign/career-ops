@@ -52,7 +52,12 @@ const SELECTORS = {
   // for each job card on the search page. The previous "Dismiss button →
   // ancestor div[role='button']" XPath stopped matching when LinkedIn dropped
   // the per-card Dismiss control from the default search list.
-  listingCard: 'div[data-job-id]',
+  //
+  // 2026-10: LinkedIn rolled out "AI-powered job search" (/jobs/search-results/)
+  // with hashed class names and no data-job-id. Cards are now
+  // `div[role=button][componentkey="job-card-component-ref-<jobId>"]`; the legacy
+  // selector stays in the union so accounts still on the old layout work.
+  listingCard: 'div[data-job-id], div[role="button"][componentkey^="job-card-component-ref-"]',
   cardJobsViewLink: 'a[href*="/jobs/view/"]',
 
   // Detail panel selectors. Primary uses dedicated CSS classes shipped with
@@ -393,9 +398,12 @@ async function clickCard(page, index) {
     // search-results link, not the job's canonical permalink). The card's own
     // `data-job-id` attribute is the reliable source for the real job ID,
     // independent of that SPA routing quirk.
+    // New layout: cards have no inner /jobs/view/ link and the job ID lives in
+    // the componentkey ("job-card-component-ref-<id>"); click the card itself.
+    const ck = (card.getAttribute('componentkey') || '').match(/job-card-component-ref-(\d+)/);
     const a = card.querySelector(link);
     (a || card).click();
-    return { clicked: true, jobId: card.getAttribute('data-job-id') || null };
+    return { clicked: true, jobId: card.getAttribute('data-job-id') || (ck ? ck[1] : null) };
   }, { sel: SELECTORS.listingCard, link: SELECTORS.cardJobsViewLink, idx: index });
 }
 
@@ -409,7 +417,7 @@ async function extractDetailFromPanel(page) {
   // Wait for the right-pane to populate before reading. LinkedIn sometimes
   // renders the panel shell before the company name DOM mounts (sponsored
   // placements especially), which produced empty-company entries in scans.
-  await page.waitForSelector(SELECTORS.panelCompany, { state: 'visible', timeout: 5000 }).catch(() => {});
+  await page.waitForSelector(`${SELECTORS.panelCompany}, [aria-label^="Company, "]`, { state: 'visible', timeout: 5000 }).catch(() => {});
 
   // Expand description if collapsed (best-effort; some panels render fully
   // expanded already, in which case the button isn't present).
@@ -420,20 +428,38 @@ async function extractDetailFromPanel(page) {
   await sleep(500);
 
   return page.evaluate(({ sel, noiseLabels, minLen }) => {
+    // 2026-10 layout: no h1 / #job-details / stable classes. The detail pane holds
+    // the ONLY /jobs/view/ anchor (the title), a [aria-label^="Company, "] block,
+    // a "·"-separated location line, and the JD after <h2>About the job</h2>.
+    // Used as a fallback when the legacy selectors miss.
+    const viewLink = document.querySelector('a[href*="/jobs/view/"]');
+    let topRoot = viewLink;
+    while (topRoot && !topRoot.querySelector('[aria-label^="Company, "]')) topRoot = topRoot.parentElement;
+
     const titleEl = document.querySelector(sel.panelTitle);
     let title = titleEl?.textContent?.trim() ?? '';
+    if (!title && viewLink && topRoot) title = viewLink.textContent.trim();
     if (noiseLabels.includes(title.toLowerCase()) || title.length < minLen) {
       title = '';
     }
 
     const companyEl = document.querySelector(sel.panelCompany);
-    const company = companyEl?.textContent?.trim() ?? '';
+    let company = companyEl?.textContent?.trim() ?? '';
+    if (!company && topRoot) {
+      company = topRoot.querySelector('[aria-label^="Company, "] p')?.textContent?.trim() ?? '';
+    }
 
     const applyEl = document.querySelector(sel.panelApply);
     const applicationUrl = applyEl?.href?.trim() ?? '';
 
     const jdEl = document.querySelector(sel.panelJdContent);
-    const jdText = jdEl?.innerText?.trim() ?? '';
+    let jdText = jdEl?.innerText?.trim() ?? '';
+    if (!jdText) {
+      const h2 = [...document.querySelectorAll('h2')].find(h => h.textContent.trim() === 'About the job');
+      jdText = (h2?.parentElement?.nextElementSibling?.innerText ?? '')
+        .replace(/\s*…\s*more\s*$/i, '')
+        .trim();
+    }
 
     // Location is the first "·"-separated segment of the primary/tertiary
     // description line (e.g. "Chicago, IL · 2 weeks ago · 47 applicants").
@@ -442,7 +468,11 @@ async function extractDetailFromPanel(page) {
     // so downstream evaluation doesn't silently treat missing data as
     // "no location constraint."
     const locationEl = document.querySelector(sel.panelLocation);
-    const locationRaw = locationEl?.textContent?.trim() ?? '';
+    let locationRaw = locationEl?.textContent?.trim() ?? '';
+    if (!locationRaw && topRoot) {
+      const p = [...topRoot.querySelectorAll('p')].find(x => x.textContent.includes('·'));
+      locationRaw = p?.textContent?.trim() ?? '';
+    }
     const location = locationRaw ? locationRaw.split('·')[0].trim() : '';
 
     return { title, company, applicationUrl, jdText, location, url: window.location.href };
