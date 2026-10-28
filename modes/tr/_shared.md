@@ -56,8 +56,17 @@ Değerlendirme 6 blok (A-F) üzerinden yapılır ve 1-5 arası global bir puan v
 **Puan yorumu:**
 - 4,5+ → Güçlü eşleşme, hemen başvur
 - 4,0-4,4 → İyi eşleşme, başvurmaya değer
-- 3,5-3,9 → Kabul edilebilir ama ideal değil; özel bir neden olmadıkça geç
+- 3,5-3,9 → Kabul edilebilir ama ideal değil; kullanıcı belirli bir neden söylemedikçe başvurmamayı öner (AGENTS.md'deki Ethical Use sınırı 4,0'da çizer)
 - 3,5'in altı → Başvuru önerilmez (CLAUDE.md'deki Etik Kullanım bölümüne bakın)
+
+**"Kültürel Sinyaller" boyutu nasıl puanlanır:**
+1. `config/profile.yml` dosyasından `culture_screen.require` alanını okuyun. Eğer `culture_screen` eksik veya boşsa, yapısal puan kısıtlamasını atlayın ve boyutu şirket büyüklüğü, uzaktan çalışma politikası ve istikrara göre nitel olarak puanlayın.
+2. İş tanımında (JD) ve Blok G şirket araştırmasında bu gereksinimlere karşılık gelen kanıtları aktif olarak arayın (örn. ekip büyüklüğünden bahsedilmesi, organizasyon şemasının derinliği/yönetici katmanları, toplantı kültürü dili, şirket aşaması).
+3. **Eğer çoğu `require` kriteri için olumlu kanıt varsa** → 4-5 puan verin.
+4. **Eğer bazı kriterler için olumlu kanıt varsa ve hiçbiri çelişmiyorsa** → 3 puan verin.
+5. **Eğer kanıtlar `require` kriterleriyle çelişiyorsa** → **bu boyutu 2/5 ile sınırlayın** ve eksik olanı veya çelişeni belirten Blok A Kültürel Sinyaller alanına açık bir satır ekleyin. Yüksek bir CV eşleşme puanının bunu sessizce telafi etmesine izin vermeyin — bunu ön plana çıkarın, saklamayın.
+6. **Eğer hiçbir `require` kriteri için kanıt yoksa** → varsayılan olarak 3 puan verin, ancak `culture_screen.deprioritize_if_absent: true` ayarlanmışsa, bu durumda **bu boyutu 2/5 ile sınırlayın**.
+7. Genel olarak 4,5+ puan alan ancak Kültürel Sinyallerden 2 veya daha düşük alan bir rol, raporda açık bir uyarı taşımalıdır: "Yüksek teknik uyum, doğrulanmamış/zayıf kültür uyumu — başvurmadan önce doğrulayın."
 
 ## İlan Meşruiyeti (Blok G)
 
@@ -105,7 +114,41 @@ Sistem tüm hedef rollere eşit özenle yaklaşır. Maaş ve gelişim fırsatı 
 
 ### Arketip Tespiti
 
-Her ilanı aşağıdaki türlerden birine (ya da en fazla ikisine) sınıflandır:
+İlanı arketipe göre sınıflandır. `modes/_profile.md` → *Your Target Roles*
+belirleyicidir: orada arketip tanımlanmışsa tespiti **o** tabloya göre yap,
+aşağıdakini yalnızca onun kapsamadığı durumlar için yedek olarak kullan. Bu,
+yukarıda belirtilen önceliğin aynısıdır: kullanıcının `_profile.md`'deki
+özelleştirmeleri bu dosyadaki varsayılanları geçersiz kılar. `_profile.md` yoksa,
+*Your Target Roles* bölümü yoksa ya da o tabloda hiç satır yoksa, aşağıdaki
+varsayılan tablo hedef kümesidir: sınıflandırmayı ona göre yap; oradaki bir
+eşleşme hedefli sayılır.
+
+Aşağıdaki tablo kapalı bir liste değil, bir varsayılandır. Belirli bir iş
+aramasını yansıtır (bkz. AGENTS.md → Origin) ve her kullanıcının alanını
+tanımlamaz: silikon tasarım doğrulama mühendisi, kantitatif analist ya da
+klinisyen için burada hiçbir arketip yoktur.
+
+**İlan, kullanıcının gerçekten hedeflediği hiçbir arketiple eşleşmiyorsa bunu
+açıkça söyle ve North Star uyumuna 1 ver.** Bu gerçek ve işe yarar bir sinyaldir.
+İlanı en yakın etikete — ya da ikisinin "hibrit"ine — zorlamak, kullanıcının
+başvurmadığı bir iş için kendinden emin bir uyum anlatısı üretir; bu, düşük bir
+puandan daha kötüdür, çünkü analiz gibi okunur.
+
+**Aşağıdaki varsayılan tabloyla eşleşmek, kullanıcının hedefleriyle eşleşmek
+demek değildir.** `_profile.md`'de arketip tanımlıysa "hedefli", onlardan biri
+demektir. Varsayılan tablodaki bir satıra tam oturan ama `_profile.md`'deki
+hiçbir şeye uymayan ilan yine de eşleşmeyen bir ilandır: rolü açıklamaya
+yardımcı oluyorsa varsayılan arketipin adını ver, ama North Star'ı yine
+eşleşmeyen olarak puanla. Yedek tabloyu hedef gibi okumak, bu bölümün önlemek
+için var olduğu hatanın ta kendisidir.
+
+**Puan konusunda: eşleşmeyen bir ilan North Star'da 1 alır.** `modes/ofertas.md`
+bu boyutu `5 = exact target role, 1 = unrelated` diye sabitler; eşleşmeyen ilan bu
+ölçeğin ortası değil, `1` ucudur — kullanıcının aradığı bir ilan değildir ve 2 ya
+da 3, var olmayan kısmi bir uyum gibi okunur. Kullanıcının hedeflerinden biriyle
+tam olarak ya da ikisinin hibriti olarak eşleşen ilan ise her zamanki gibi aynı
+ölçeğin geri kalanına göre puanlanır; bu bölüm onun yanına ikinci bir ölçek
+eklemez.
 
 | Arketip | İlanda öne çıkan sinyaller |
 |---------|---------------------------|
@@ -244,7 +287,7 @@ Türkçe iş ilanlarında ve sözleşme müzakerelerinde, yabancı piyasalarda k
 3. CV eşleştirmesinde dosyadan tam satır alıntıla
 4. Maaş ve şirket bilgisi için WebSearch kullan
 5. Değerlendirmeden sonra takipçiye kaydet
-6. İçeriği ilanın dilinde üret — ilan Türkçeyse Türkçe, İngilizce ise İngilizce
+6. Kullanıcıya yönelik içeriği, ilanın dili ne olursa olsun `config/profile.yml` içindeki `{language.output}` dilinde üret (ayarlı değilse İngilizce). Bu pazarın terimlerini koru ve gerektiğinde o dilde açıkla
 7. Doğrudan ve eyleme dönük ol — gereksiz ayrıntı yazma
 8. Türkçe metin üretirken: doğal Türkçe kullan, kelimesi kelimesine çeviriden kaçın. Kısa cümleler, aktif fiiller. Stack, pipeline, deploy, backend, frontend gibi yerleşik teknik terimler zorla Türkçeleştirilmemeli
 8b. **PDF Professional Summary'de vaka çalışması URL'leri:** Adayın demo veya proje linki varsa ilk paragrafta göster — recruiter genellikle sadece summary'i okur
@@ -260,9 +303,9 @@ Türkçe iş ilanlarında ve sözleşme müzakerelerinde, yabancı piyasalarda k
 | Playwright | İlan doğrulama (browser_navigate + browser_snapshot). **KRİTİK: Aynı anda 2+ ajan Playwright ile çalıştırma — tek browser instance paylaşılır** |
 | Read | cv.md, _profile.md, article-digest.md, cv-template.html |
 | Write | PDF için geçici HTML, rapor .md dosyaları, `batch/tracker-additions/*.tsv` (yeni takipçi girişleri) |
-| Edit | `data/applications.md`'de mevcut satır güncellemeleri (durum, PDF, rapor bağlantısı) |
+| Edit | Rapor ve diğer üretilmiş içerikteki düzeltmeler. `data/applications.md` tablosu asla doğrudan düzenlenmez: yeni satırlar TSV olarak eklenip `node merge-tracker.mjs` ile birleştirilir, mevcut satırların durum ve not güncellemeleri `node set-status.mjs` ile yapılır |
 | Canva MCP | İsteğe bağlı görsel CV üretimi. Temel tasarımı çoğalt, metni düzenle, PDF olarak dışa aktar. `profile.yml`'de `canva_resume_design_id` gerektirir. |
-| Bash | `node generate-pdf.mjs` |
+| Bash | `node generate-pdf.mjs`, `node merge-tracker.mjs`, `node set-status.mjs` |
 
 ---
 

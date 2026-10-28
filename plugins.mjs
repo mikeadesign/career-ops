@@ -20,21 +20,29 @@ import path from 'path';
 import { existsSync, readFileSync, writeFileSync, rmSync, mkdirSync } from 'fs';
 import { fileURLToPath } from 'url';
 import * as yaml from 'js-yaml';
+import { hasYamlContent, loadYaml } from './lib/yaml-document.mjs';
 
 import {
   discoverPlugins, pluginRoots, loadPluginConfig, pluginStatus,
   runHook, filterResultsForId, loadDotenvOnce, HOOK_KINDS, loadSkill, resolveSuccessorIds,
+  warnConfigLeftInCodeRoot, ID_RE,
 } from './plugins/_engine.mjs';
 import { loadRegistry, findInRegistry, classifySource, sourceBadge, successorFor } from './plugins/_registry.mjs';
 import { readLock, writeLockEntry, removeLockEntry, hashPluginTree, consentSurface } from './plugins/_lock.mjs';
 import { installFromRepo, scaffoldNew, parseRepoArg } from './plugin-install.mjs';
-import { appendToPipeline } from './scan.mjs';
+import { appendToPipeline, appendToScanHistory, PORTALS_PATH } from './scan.mjs';
+import { createAdmissionGate, formatSkipCounts } from './lib/admission-gate.mjs';
+import { localToday } from './lib/local-today.mjs';
+import { postingKey } from './url-key.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
-import { getCareerOpsRoot } from './path-resolver.mjs';
+import { getCareerOpsRoot, resolveTrackerPath } from './path-resolver.mjs';
+import { resolveColumns, parseTrackerRow, isHeaderRow, isSeparatorRow } from './tracker-parse.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const DATA_ROOT = getCareerOpsRoot();
-const APPLICATIONS_PATH = path.join(DATA_ROOT, 'data', 'applications.md');
+// The same read resolution as set-status.mjs and every other tracker reader:
+// CAREER_OPS_TRACKER, then data/applications.md, then the legacy root copy.
+const APPLICATIONS_PATH = resolveTrackerPath(DATA_ROOT);
 const PIPELINE_PATH = path.join(DATA_ROOT, 'data', 'pipeline.md');
 
 // A misbehaving plugin's stray rejection should be attributed and not silently
@@ -57,19 +65,40 @@ function sanitizeJob(job) {
   return out;
 }
 
-/** Generic markdown-table parser → rows keyed by lowercased header. READ-ONLY. */
-function parseMarkdownTable(md) {
-  const lines = md.split('\n').map(l => l.trim()).filter(l => l.startsWith('|'));
-  if (lines.length < 2) return [];
-  const headers = lines[0].split('|').slice(1, -1).map(h => h.trim().toLowerCase());
+// The backfill sentinels a `#` cell may carry instead of a number (AGENTS.md).
+const NUM_SENTINELS = new Set(['N/A', '—', '-']);
+
+/**
+ * Tracker rows for the export snapshot, READ-ONLY. Columns are mapped by
+ * tracker-parse.mjs through tracker-aliases.json, so a localized header
+ * (`| # | Datum | Firma | Rolle |`) yields the same canonical keys as the
+ * English one: num, date, company, role, score, status, pdf, report, notes, url,
+ * plus location / via when the tracker has those columns. Every value is a
+ * string, and `url` is the posting href rather than the rendered link cell.
+ *
+ * parseTrackerRow rejects a row whose `#` is not a number, so a backfilled row
+ * numbered with a sentinel is parsed with a placeholder number and keeps its
+ * sentinel as `num`: the snapshot carries every row the tracker shows.
+ */
+function trackerSnapshotRows(md) {
+  const lines = md.split('\n');
+  const colmap = resolveColumns(lines);
   const rows = [];
-  for (const line of lines.slice(1)) {
-    if (/^\|[\s|:-]+\|?$/.test(line)) continue; // separator row
-    const cells = line.split('|').slice(1, -1).map(c => c.trim());
-    if (cells.length === 0) continue;
-    const row = {};
-    headers.forEach((h, i) => { row[h] = cells[i] ?? ''; });
-    rows.push(Object.freeze(row));
+  for (const line of lines) {
+    if (!line.startsWith('|') || isHeaderRow(line) || isSeparatorRow(line)) continue;
+    let row = parseTrackerRow(line, colmap);
+    if (!row) {
+      const parts = line.split('|');
+      const num = (parts[colmap.num] ?? '').trim();
+      if (!NUM_SENTINELS.has(num)) continue;
+      parts[colmap.num] = ' 0 ';
+      row = parseTrackerRow(parts.join('|'), colmap);
+      if (!row) continue;
+      row.num = num;
+    }
+    const fields = { ...row, num: String(row.num) };
+    delete fields.raw;
+    rows.push(Object.freeze(fields));
   }
   return rows;
 }
@@ -83,12 +112,62 @@ function existingPipelineUrls() {
   return urls;
 }
 
+/** portals.yml, for its title_filter and location_filter. An unreadable file stops the run, as in scan.mjs. */
+function loadPortalsConfig() {
+  if (!existsSync(PORTALS_PATH)) return {};
+  try {
+    return loadYaml(readFileSync(PORTALS_PATH, 'utf8')) || {};
+  } catch (err) {
+    console.error(`Error: failed to parse ${PORTALS_PATH}: ${err.message}`);
+    process.exit(1);
+  }
+}
+
+/** Jobs whose posting is not in the pipeline yet, one per posting. */
+export function newPipelineJobs(found, pipelineUrls) {
+  const seen = new Set([...pipelineUrls].map(postingKey));
+  return found.filter((j) => {
+    const key = postingKey(j.url) || j.url;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+/**
+ * The ingest/search results that go into data/pipeline.md (#5478).
+ *
+ * newPipelineJobs first collapses one posting's alert and job-page URLs. Every
+ * result is then checked against the tracker, the pipeline and scan-history by
+ * normalized URL: checking the pipeline alone re-queued roles already applied
+ * to. A plugin whose manifest declares `jobPostings: true` also gets the
+ * scanner's discovery filters, data/blacklist.md and the title and location
+ * filters. Other ingests (google-calendar and outlook-interviews return
+ * interview events titled "Interview with Acme") would lose every row to a
+ * title filter written for job titles, so they skip those filters.
+ *
+ * @param {Array<object>} found - Sanitized hook results.
+ * @param {object} options
+ * @param {string} options.id - Plugin id, recorded as the posting's source.
+ * @param {boolean} [options.jobPostings] - The manifest's jobPostings flag.
+ * @param {Set<string>} [options.pipelineUrls]
+ * @param {object} [options.config] - Parsed portals.yml.
+ * @param {object} [options.gateOptions] - Overrides for createAdmissionGate (tests).
+ */
+export function admitPluginJobs(found, { id, jobPostings = false, pipelineUrls = new Set(), config = {}, gateOptions = {} }) {
+  const discoveryFilters = jobPostings
+    ? { config }
+    : { titleFilter: () => true, locationFilter: () => true, blacklist: new Map() };
+  const gate = createAdmissionGate({ ...discoveryFilters, ...gateOptions });
+  const { admitted } = gate.partition(newPipelineJobs(found, pipelineUrls).map(j => ({ ...j, source: `plugin:${id}` })));
+  return { jobs: admitted, counts: gate.counts };
+}
+
 /** Frozen, read-only view of the user's tracker for `export` hooks. No file handle. */
 function buildSnapshot() {
   const applications = existsSync(APPLICATIONS_PATH)
-    ? parseMarkdownTable(readFileSync(APPLICATIONS_PATH, 'utf8')) : [];
-  // pipeline.md uses a checklist format (`- [ ] url`), not a markdown table —
-  // parseMarkdownTable would always return [] here.
+    ? trackerSnapshotRows(readFileSync(APPLICATIONS_PATH, 'utf8')) : [];
+  // pipeline.md uses a checklist format (`- [ ] url`), not a markdown table.
   const pipeline = existsSync(PIPELINE_PATH)
     ? [...readFileSync(PIPELINE_PATH, 'utf8').matchAll(/- \[[ xX]\]\s+(\S+)/g)]
         .map(m => Object.freeze({ url: m[1] }))
@@ -100,7 +179,9 @@ function buildSnapshot() {
 }
 
 async function cmdList() {
-  const cfg = await loadPluginConfig(ROOT);
+  warnConfigLeftInCodeRoot(ROOT, DATA_ROOT);
+  const cfg = await loadPluginConfig(DATA_ROOT);
+  await loadDotenvOnce(DATA_ROOT);
   const overridden = resolveSuccessorIds(ROOT); // ids where an installed successor is active
   const manifests = discoverPlugins(pluginRoots(ROOT), overridden);
   if (manifests.length === 0) {
@@ -131,7 +212,8 @@ async function cmdRun(args) {
   const id = positional[0];
   if (!id) { console.error('Usage: node plugins.mjs run <id> [hook] [args…] [--dry-run]'); process.exit(1); }
 
-  const cfg = await loadPluginConfig(ROOT);
+  warnConfigLeftInCodeRoot(ROOT, DATA_ROOT);
+  const cfg = await loadPluginConfig(DATA_ROOT);
   const manifest = discoverPlugins(pluginRoots(ROOT), resolveSuccessorIds(ROOT)).find(m => m.id === id);
   if (!manifest) { console.error(`Unknown plugin "${id}". Run \`node plugins.mjs list\`.`); process.exit(1); }
 
@@ -151,25 +233,37 @@ async function cmdRun(args) {
   }
   if (!manifest.hooks.includes(hook)) { console.error(`Plugin "${id}" does not expose a "${hook}" hook (has: ${manifest.hooks.join(', ')}).`); process.exit(1); }
 
+  // The user-layer .env belongs beside config/plugins.yml under DATA_ROOT.
+  // Load it before the gate so a configured key is not reported as missing.
+  await loadDotenvOnce(DATA_ROOT);
+
   // Two-gate check with an actionable message before doing any work.
   const status = pluginStatus(manifest, cfg);
   if (!status.configured) { console.error(`Plugin "${id}" is not enabled. Set plugins.${id}.enabled: true in config/plugins.yml.`); process.exit(1); }
   if (status.missingEnv.length) { console.error(`Plugin "${id}" is missing ${status.missingEnv.join(', ')} in .env. See .env.example.`); process.exit(1); }
 
-  await loadDotenvOnce();
-
   if (hook === 'ingest' || hook === 'search') {
     const payload = hook === 'search' ? positional.slice(hookArgStart).join(' ') : undefined;
     if (hook === 'search' && !payload) { console.error(`search needs a query: node plugins.mjs run ${id} search "<query>"`); process.exit(1); }
-    const results = filterResultsForId(await runHook(hook, payload, { root: ROOT, dryRun, pluginId: id }), id);
+    const results = filterResultsForId(await runHook(hook, payload, { root: ROOT, dataRoot: DATA_ROOT, dryRun, pluginId: id }), id);
     const found = results.filter(r => r.ok && Array.isArray(r.result)).flatMap(r => r.result).map(sanitizeJob).filter(Boolean);
-    // Additive de-dup: never re-add a URL already in the pipeline.
-    const known = existingPipelineUrls();
-    const seen = new Set();
-    const jobs = found.filter(j => !known.has(j.url) && !seen.has(j.url) && seen.add(j.url));
-    console.log(`${id} ${hook}: ${found.length} found, ${jobs.length} new.`);
+    const { jobs, counts } = admitPluginJobs(found, {
+      id,
+      jobPostings: manifest.jobPostings,
+      pipelineUrls: existingPipelineUrls(),
+      config: manifest.jobPostings ? loadPortalsConfig() : {},
+    });
+    const skipped = formatSkipCounts(counts);
+    console.log(`${id} ${hook}: ${found.length} found, ${jobs.length} new${skipped ? ` (skipped: ${skipped})` : ''}.`);
     if (dryRun) { jobs.slice(0, 20).forEach(j => console.log(`  • ${j.title} — ${j.url}`)); console.log('(--dry-run: pipeline not written)'); return; }
-    if (jobs.length) { await appendToPipeline(jobs); console.log(`→ Appended ${jobs.length} to data/pipeline.md. Run /career-ops pipeline to evaluate.`); }
+    if (jobs.length) {
+      await appendToPipeline(jobs);
+      // Recorded so the next ingest, and every scanner, sees these as known.
+      // Only postings: an interview event in scan-history would read as a
+      // scanned job everywhere scan-history is counted.
+      if (manifest.jobPostings) await appendToScanHistory(jobs, localToday(), 'added');
+      console.log(`→ Appended ${jobs.length} to data/pipeline.md. Run /career-ops pipeline to evaluate.`);
+    }
     return;
   }
 
@@ -180,7 +274,7 @@ async function cmdRun(args) {
     // Scale with tracker size so a growing applications.md doesn't age out.
     const rowCount = snapshot.applications.length;
     const timeoutMs = Math.min(120_000, Math.max(15_000, rowCount * 3_000));
-    const results = filterResultsForId(await runHook('export', snapshot, { root: ROOT, dryRun, timeoutMs, pluginId: id }), id);
+    const results = filterResultsForId(await runHook('export', snapshot, { root: ROOT, dataRoot: DATA_ROOT, dryRun, timeoutMs, pluginId: id }), id);
     for (const r of results) {
       if (r.ok) console.log(`${r.id} export: pushed ${r.result?.pushed ?? 0} record(s).`);
       else console.log(`${r.id} export: failed — ${r.error}`);
@@ -190,7 +284,7 @@ async function cmdRun(args) {
 
   if (hook === 'notify') {
     const message = positional.slice(hookArgStart).join(' ') || '(career-ops notification)';
-    const results = filterResultsForId(await runHook('notify', { message }, { root: ROOT, dryRun, pluginId: id }), id);
+    const results = filterResultsForId(await runHook('notify', { message }, { root: ROOT, dataRoot: DATA_ROOT, dryRun, pluginId: id }), id);
     for (const r of results) console.log(r.ok ? `${r.id} notify: sent.` : `${r.id} notify: failed — ${r.error}`);
     return;
   }
@@ -226,20 +320,11 @@ export function parsePluginConfig(raw, file) {
   // Absent is not unreadable: no file means a first enable, which is the whole
   // point of the function. Only an existing-but-unparseable file is a refusal.
   if (raw == null) return {};
-  // An empty or comment-only file is "no config yet", not a corrupt one, and it
-  // must take the same path as an absent one. Decided from the text rather than
-  // from what the parser does with it: js-yaml 4 returns undefined for an empty
-  // document and js-yaml 5 throws "expected a document, but the input is empty",
-  // so inferring it from the parser would make this refuse to write over a
-  // comment-only config on one major and not the other.
-  const hasContent = raw.split('\n').some((line) => {
-    const t = line.trim();
-    return t !== '' && !t.startsWith('#');
-  });
-  if (!hasContent) return {};
+  // An empty or comment-only file is "no config yet", not a corrupt one.
+  if (!hasYamlContent(raw)) return {};
   let cfg;
   try {
-    cfg = yaml.load(raw);
+    cfg = loadYaml(raw);
   } catch (err) {
     throw new Error(
       `${file} is not valid YAML (${String(err.message).split('\n')[0]}) — refusing to overwrite it. `
@@ -257,26 +342,42 @@ export function parsePluginConfig(raw, file) {
 
 // Write enabled:true/false into config/plugins.yml, merging (never clobbering
 // the user's other plugins or non-secret settings).
-function setEnabled(id, on, settings) {
-  const file = path.join(ROOT, 'config', 'plugins.yml');
+export function setPluginEnabled(root, id, on, settings) {
+  const file = path.join(root, 'config', 'plugins.yml');
   const cfg = parsePluginConfig(existsSync(file) ? readFileSync(file, 'utf8') : null, file);
   if (!cfg.plugins || typeof cfg.plugins !== 'object') cfg.plugins = {};
   const prev = (cfg.plugins[id] && typeof cfg.plugins[id] === 'object') ? cfg.plugins[id] : {};
   cfg.plugins[id] = { ...prev, ...(settings || {}), enabled: on };
-  mkdirSync(path.join(ROOT, 'config'), { recursive: true });
+  mkdirSync(path.join(root, 'config'), { recursive: true });
   writeFileSync(file, '# career-ops plugin activation — see config/plugins.example.yml\n' + yaml.dump(cfg), 'utf8');
 }
 
+const setEnabled = (id, on, settings) => setPluginEnabled(DATA_ROOT, id, on, settings);
+
 // The capability card a user must consent to before a plugin runs.
-function capabilityCard(manifest, source) {
+export function capabilityCard(manifest, source) {
+  const hasLoopbackHost = manifest.allowedHosts.some(host =>
+    /^(localhost|127\.\d+\.\d+\.\d+|\[?::1\]?)$/i.test(host));
+  const localhostSuffix = manifest.allowsLocalhost && !hasLoopbackHost ? '  + localhost' : '';
   return [
     `\n  Plugin:        ${manifest.id}  (${sourceBadge(source)})`,
     `  Does:          ${manifest.description}`,
     `  Hooks:         ${manifest.hooks.join(', ')}`,
     `  Reads keys:    ${manifest.requiredEnv.length ? manifest.requiredEnv.join(', ') + '  (you provide these in .env)' : 'none'}`,
-    `  Network:       ${manifest.allowedHosts.length ? manifest.allowedHosts.join(', ') : '(none declared)'}${manifest.allowsLocalhost ? '  + localhost' : ''}`,
+    `  Network:       ${manifest.allowedHosts.length ? manifest.allowedHosts.join(', ') : '(none declared)'}${localhostSuffix}`,
     `  Ships a skill: ${manifest.skill ? 'yes — instructs your AI tool when you run `plugins.mjs skill`' : 'no'}`,
   ].join('\n');
+}
+
+/**
+ * Who publishes a registry entry. Older entries carry no `author`, so fall back
+ * to the owner in the GitHub repo URL; null when neither says.
+ * @param {{ author?: unknown, repo?: unknown }} entry
+ */
+export function registryAuthor(entry) {
+  if (typeof entry.author === 'string' && entry.author.trim()) return entry.author.trim();
+  const owner = /^https:\/\/github\.com\/([^/]+)\//.exec(String(entry.repo ?? ''));
+  return owner ? owner[1] : null;
 }
 
 async function cmdAvailable() {
@@ -293,8 +394,9 @@ async function cmdAvailable() {
     console.log('  (none yet — publish yours as `career-ops-plugin-<name>` and open a registry PR; see docs/PLUGINS.md)');
   } else {
     for (const p of reg.plugins) {
+      const author = registryAuthor(p);
       const seed = p.supersedesBundled === true ? `  🔁 maintained successor of the bundled "${p.id}" reference` : '';
-      console.log(`  ${p.name}  [${p.hooks.join(', ')}]  ✓ approved (pinned ${String(p.sha).slice(0, 7)})  — ${p.description}  (by ${p.author}, v${p.version})${seed}`);
+      console.log(`  ${p.name}  [${p.hooks.join(', ')}]  ✓ approved (pinned ${String(p.sha).slice(0, 7)})  — ${p.description}  (${author ? `by ${author}, ` : ''}v${p.version})${seed}`);
     }
     console.log('\nInstall:  node plugins.mjs add <name>');
   }
@@ -355,6 +457,11 @@ function cmdTrust(args) {
 function cmdRemove(args) {
   const id = args[0];
   if (!id) { console.error('Usage: node plugins.mjs remove <id>'); process.exit(1); }
+  // Ids reach path.join(ROOT, 'plugins.local', id) → rmSync recursive below;
+  // path.join normalizes `..`, so an unvalidated id escapes plugins.local
+  // (remove .. would take the checkout root with it). Same shape the engine
+  // already enforces for manifest ids (_engine.mjs ID_RE).
+  if (!ID_RE.test(id)) { console.error(`✗ Invalid plugin id ${JSON.stringify(id)} (need ^[a-z0-9][a-z0-9-]*$)`); process.exit(1); }
   const dir = path.join(ROOT, 'plugins.local', id);
   if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
   removeLockEntry(ROOT, id);

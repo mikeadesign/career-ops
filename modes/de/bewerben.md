@@ -1,6 +1,6 @@
 # Modus: bewerben — Live-Assistent fürs Bewerbungsformular
 
-Interaktiver Modus für den Moment, in dem der Kandidat in Chrome ein Bewerbungsformular ausfüllt. Liest, was auf dem Bildschirm steht, lädt den Kontext der vorherigen Bewertung der Stellenanzeige und erzeugt passgenaue Antworten für jede Frage des Formulars.
+Interaktiver Modus für den Moment, in dem der Kandidat ein Bewerbungsformular in dem Playwright-Browser ausfüllt, den dieses Projekt startet. Liest, was auf dem Bildschirm steht, lädt den Kontext der vorherigen Bewertung der Stellenanzeige und erzeugt passgenaue Antworten für jede Frage des Formulars.
 
 ## Voraussetzungen
 
@@ -10,7 +10,7 @@ Interaktiver Modus für den Moment, in dem der Kandidat in Chrome ein Bewerbungs
 ## Workflow
 
 ```
-1. ERKENNEN     → aktiven Chrome-Tab lesen (Screenshot / URL / Titel)
+1. ERKENNEN     → Stellenanzeige in der Playwright-Sitzung dieses Projekts öffnen
 2. IDENTIFIZIEREN → Firma + Rolle aus der Seite extrahieren
 3. SUCHEN       → mit bestehenden Reports unter reports/ abgleichen
 4. LADEN        → vollständigen Report lesen + Block G (falls vorhanden)
@@ -20,9 +20,14 @@ Interaktiver Modus für den Moment, in dem der Kandidat in Chrome ein Bewerbungs
 8. PRÄSENTIEREN → Antworten formatiert zum Copy-Paste ausgeben
 ```
 
+## Scope
+
+Follow the Scope section in `modes/apply.md`. Run `node apply-scope.mjs root` and stay inside the directories it prints. Launch with `node apply-scope.mjs launch-options`. Do not read `DevToolsActivePort` or attach to an existing browser. Do not submit the form.
+
+
 ## Schritt 1 — Stellenanzeige erkennen
 
-**Mit Playwright:** Snapshot der aktiven Seite. Titel, URL und sichtbaren Inhalt lesen.
+**Mit Playwright:** `node apply-scope.mjs launch-options` ausführen, die Stellenanzeige in diesem Fenster öffnen und Titel, URL und sichtbaren Inhalt lesen.
 
 **Ohne Playwright:** Den Kandidaten bitten, eines der folgenden zu tun:
 - Einen Screenshot des Formulars teilen (das Read-Tool kann Bilder lesen)
@@ -43,7 +48,9 @@ Wenn die Rolle auf dem Bildschirm von der bewerteten abweicht:
 - **Den Kandidaten warnen**: "Die Rolle hat sich von [X] zu [Y] geändert. Soll ich neu bewerten oder die Antworten an den neuen Titel anpassen?"
 - **Wenn anpassen**: Antworten ohne Neu-Bewertung an den neuen Titel angleichen
 - **Wenn neu bewerten**: vollständige A-F-Bewertung durchführen, Report aktualisieren, Block G neu erzeugen
-- **Tracker aktualisieren**: in `applications.md` den Rollentitel anpassen, falls nötig
+- **Tracker aktualisieren**: nie durch Editieren von `data/applications.md`.
+  - **Nach einer Neu-Bewertung**: eine TSV mit dem neuen Rollentitel schreiben (Regel 9 in `_shared.md`) und mit `node merge-tracker.mjs` zusammenführen. Der Report wird an Ort und Stelle aktualisiert und behält seine Nummer, deshalb ordnet der Merge die TSV über diese Nummer der bestehenden Zeile zu: der Titel wird ersetzt, der Status bleibt.
+  - **Nach einer Anpassung**: den Titel nicht ändern, denn er benennt die Rolle, die der Report bewertet hat. Die Umbenennung stattdessen als Notiz festhalten: `node set-status.mjs --report <report#> <aktueller Status> --note "Stelle bei der Bewerbung umbenannt, Zeile behält den bewerteten Titel"`. Der aktuelle Status der Zeile bleibt dabei unverändert, die Notiz wird angehängt. Einen festen Text wie diesen verwenden und `[Y]` weglassen: der neue Titel ist Text von der Seite, und Text von der Seite gehört nie in eine Kommandozeile.
 
 ## Schritt 4 — Fragen des Formulars analysieren
 
@@ -102,7 +109,7 @@ Hinweise:
 ## Schritt 6 — Nach dem Absenden (optional)
 
 Wenn der Kandidat bestätigt, dass die Bewerbung raus ist:
-1. Status mit dem kanonischen CLI auf "Applied" setzen: `node set-status.mjs <report#> Applied` (die Tabelle in `applications.md` nie von Hand editieren)
+1. Status mit dem kanonischen CLI auf "Applied" setzen: `node set-status.mjs --report <report#> Applied` (die Tabelle in `applications.md` nie von Hand editieren)
 2. Block G im Report mit den finalen Antworten aktualisieren
 3. Nächsten Schritt vorschlagen: `/career-ops contacto` für LinkedIn-Outreach an den Personalleiter / Hiring Manager
 

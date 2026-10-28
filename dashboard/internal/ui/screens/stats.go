@@ -185,7 +185,12 @@ func (m StatsModel) renderBody() string {
 		m.theme.Yellow,
 		m.theme.Red,
 	}, false)
-	workModes := m.renderLabelCountTable(i18n.Current.WorkModeTitle, m.metrics.WorkModes)
+	modeStats := make([]model.LabelCountStat, len(m.metrics.WorkModes))
+	for i, s := range m.metrics.WorkModes {
+		s.Label = i18n.Current.WorkModeLabel(s.Label)
+		modeStats[i] = s
+	}
+	workModes := m.renderLabelCountTable(i18n.Current.WorkModeTitle, modeStats)
 	locations := m.renderLabelCountTable(i18n.Current.LocationTitle, m.metrics.Locations)
 	pay := m.renderPay()
 
@@ -357,7 +362,7 @@ func (m StatsModel) renderPieChart(title, legendHeading string, stats []model.La
 	var pieLines []string
 	for y := -radius; y <= radius; y++ {
 		var row strings.Builder
-		for x := -2 * radius; x <= 2 * radius; x++ {
+		for x := -2 * radius; x <= 2*radius; x++ {
 			nx := float64(x) / 2.0 // correct for 2:1 character aspect ratio
 			ny := float64(y)
 			dist := math.Sqrt(nx*nx + ny*ny)

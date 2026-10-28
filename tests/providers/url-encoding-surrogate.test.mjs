@@ -97,6 +97,20 @@ try {
     (jobs) => jobs.length === 1 && jobs[0].url.includes('g-1'),
   );
 
+  // dover.parseDoverPage — for…of over results[]; id builds the apply URL (the dedup key).
+  const { parseDoverPage } = await load('dover.mjs');
+  check(
+    'dover.parseDoverPage',
+    () => parseDoverPage(
+      { results: [
+        { id: `${LONE}bad`, title: 'Bad', locations: [] },
+        { id: 'g-1', title: 'Good', locations: [] },
+      ] },
+      { companyName: 'Acme', companySegment: 'Acme' },
+    ).jobs,
+    (jobs) => jobs.length === 1 && jobs[0].url.endsWith('/g-1'),
+  );
+
   // phenom.parseRefineSearch — for…of over refineSearch.data.jobs; jobId is the dedup key.
   const { parseRefineSearch } = await load('phenom.mjs');
   check(
@@ -199,6 +213,31 @@ try {
     ),
     (jobs) => jobs.length === 1 && jobs[0].url.includes('g-1'),
   );
+
+  // platsbanken.postingUrl — the ad id is the only segment of the permalink, and
+  // the helper's null (rather than a throw) is what lets one bad row drop.
+  const { postingUrl: platsbankenPostingUrl } = await load('platsbanken.mjs');
+  check(
+    'platsbanken.postingUrl',
+    () => [
+      platsbankenPostingUrl(`${LONE}bad`),
+      platsbankenPostingUrl('31581608'),
+    ],
+    ([bad, good]) => bad === null && good === 'https://arbetsformedlingen.se/platsbanken/annonser/31581608',
+  );
+
+  // zoho-recruit.parseZohoJobsPage — for…of over the id="jobs" records; id feeds the posting URL.
+  const { parseZohoJobsPage } = await load('zoho-recruit.mjs');
+  const zohoRecord = (id, title) => ({ id, Posting_Title: title, Is_Locked: false, Publish: true });
+  check(
+    'zoho-recruit.parseZohoJobsPage',
+    () => parseZohoJobsPage(
+      `<input type="hidden" value="${JSON.stringify([zohoRecord(`${LONE}bad`, 'Bad Id'), zohoRecord('101', 'Good Id')]).replace(/"/g, '&#34;')}" id="jobs">`,
+      { origin: 'https://acme.zohorecruit.com' },
+      'Acme',
+    ),
+    (jobs) => jobs.length === 1 && jobs[0].url === 'https://acme.zohorecruit.com/jobs/Careers/101',
+  );
 } catch (e) {
   fail(`per-provider surrogate tests crashed: ${e.message}`);
 }
@@ -224,8 +263,9 @@ try {
   // import _safe-url.mjs and call safeEncodeURIComponent; dropping either is the
   // regression this list catches.
   const CONVERTED = [
-    'alibaba.mjs', 'arbeitsagentur.mjs', 'bamboohr.mjs', 'feishu-jobs.mjs', 'garena.mjs', 'jibeapply.mjs',
-    'manfred.mjs', 'meituan.mjs', 'mokahr.mjs', 'phenom.mjs', 'thehub.mjs', 'tkms.mjs', 'vdab.mjs',
+    'alibaba.mjs', 'arbeitsagentur.mjs', 'bamboohr.mjs', 'dover.mjs', 'feishu-jobs.mjs', 'garena.mjs', 'jibeapply.mjs',
+    'kalibrr.mjs', 'manfred.mjs', 'meituan.mjs', 'mokahr.mjs', 'phenom.mjs', 'platsbanken.mjs',
+    'techinasia.mjs', 'thehub.mjs', 'tkms.mjs', 'vdab.mjs', 'zoho-recruit.mjs',
   ];
 
   // Bare `encodeURIComponent` on a url line that is reviewed as safe: the value
@@ -234,6 +274,7 @@ try {
   const ALLOWLIST = {
     'csod.mjs': 'corpName comes from portals.yml (careers_url), not from the API response',
     '4dayweek.mjs': 'slug is already validated against SLUG_RE, which rejects a surrogate before this line',
+    'dover.mjs': 'the API URL segment is the board uuid from portals.yml (careers_url), already restricted to UUID_RE',
   };
 
   let files;

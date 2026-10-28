@@ -39,7 +39,7 @@
 import { readFileSync, existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import * as yaml from 'js-yaml';
+import { loadYaml } from './lib/yaml-document.mjs';
 import { computeFunnel, computeFunnelWithHistory, parseStatusLogStages, trackerStatusByNum, computeTrackerStats } from './stats.mjs';
 import { resolveColumns, parseTrackerRow } from './tracker-parse.mjs';
 import { resolveTrackerPath, loadCanonicalStates, resolveCanonicalState } from './tracker-utils.mjs';
@@ -79,9 +79,13 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 // reconstructed afterwards. Only the door differs.
 // `reply-watch` is the same class: the user confirms the update interactively;
 // the transition is observed at that moment, not reconstructed later.
-const VALID_SOURCES = new Set(['set-status', 'web', 'correction', 'backfill', 'manual', 'reply-watch']);
-// Sources whose dates are trusted for day-math. backfill/manual are parsed and
-// counted but excluded: they are reconstructed after the fact, not observed.
+// `dedup-tracker` is the opposite class: the kept row of a duplicate pair takes
+// over the removed row's more advanced status, and that transition was found
+// at dedup time, not observed then (#5536).
+const VALID_SOURCES = new Set(['set-status', 'web', 'correction', 'backfill', 'manual', 'reply-watch', 'dedup-tracker']);
+// Sources whose dates are trusted for day-math. backfill/manual/dedup-tracker
+// are parsed and counted but excluded: they are reconstructed after the fact,
+// not observed.
 const DAY_MATH_SOURCES = new Set(['set-status', 'web', 'correction', 'reply-watch']);
 
 // The hops a candidate can measure from their own tracker. Applied→Rejected is
@@ -89,7 +93,11 @@ const DAY_MATH_SOURCES = new Set(['set-status', 'web', 'correction', 'reply-watc
 // mixes offers and rejections reads grim and means nothing.
 const HOPS = [
   { key: 'appliedToResponded', from: 'Applied', to: 'Responded' },
-  { key: 'respondedToInterview', from: 'Responded', to: 'Interview' },
+  { key: 'respondedToAssessment', from: 'Responded', to: 'Assessment' },
+  { key: 'assessmentToInterview', from: 'Assessment', to: 'Interview' },
+  // Keep the direct hop for legacy rows that moved from Responded straight to
+  // Interview before Assessment became a first-class lifecycle stage.
+  { key: 'respondedToInterview', from: 'Responded', to: 'Interview', excludeIntermediate: 'Assessment' },
   { key: 'interviewToOffer', from: 'Interview', to: 'Offer' },
   { key: 'appliedToRejected', from: 'Applied', to: 'Rejected' },
 ];
@@ -218,7 +226,10 @@ export function computeVelocity(timelines, todayStr) {
     for (const timeline of timelines.values()) {
       const fromIdx = timeline.findIndex(o => o.to === hop.from && o.dayMath);
       if (fromIdx === -1) continue;
-      const next = timeline.slice(fromIdx + 1).find(o => o.to === hop.to && o.dayMath);
+      const later = timeline.slice(fromIdx + 1);
+      const nextIdx = later.findIndex(o => o.to === hop.to && o.dayMath);
+      const next = nextIdx === -1 ? null : later[nextIdx];
+      if (next && hop.excludeIntermediate && later.slice(0, nextIdx).some(o => o.to === hop.excludeIntermediate)) continue;
       if (next) {
         const d = daysBetween(timeline[fromIdx].date, next.date);
         if (d === null || d < 0) continue;
@@ -251,7 +262,7 @@ export function loadBenchmarks(explicitPath) {
     || (existsSync(join(DATA_ROOT, 'config/benchmarks.yml')) ? join(DATA_ROOT, 'config/benchmarks.yml') : join(CODE_ROOT, 'templates/benchmarks.yml'));
   let doc;
   try {
-    doc = yaml.load(readFileSync(path, 'utf-8'));
+    doc = loadYaml(readFileSync(path, 'utf-8'));
   } catch (err) {
     throw new Error(`Cannot read benchmarks at ${path}: ${err.message}`);
   }
@@ -595,6 +606,22 @@ function selfTest() {
   check(velocity.appliedToRejected.censored === 0, 'velocity: rejection hop does not double-count censoring');
   check(velocity.interviewToOffer.n === 1 && velocity.interviewToOffer.insufficientData, 'velocity: I→O n=1 insufficient');
 
+  const ASSESSMENT_FIXTURE = [
+    '10\t2026-06-01\tApplied\tResponded\tset-status\t',
+    '10\t2026-06-04\tResponded\tAssessment\tset-status\t',
+    '10\t2026-06-09\tAssessment\tInterview\tset-status\t',
+  ].join('\n');
+  const assessmentVelocity = computeVelocity(
+    foldObservations(parseStatusLog(ASSESSMENT_FIXTURE, states).observations),
+    TODAY,
+  );
+  check(assessmentVelocity.respondedToAssessment.n === 1,
+    `velocity: Responded→Assessment expected n=1, got ${assessmentVelocity.respondedToAssessment.n}`);
+  check(assessmentVelocity.assessmentToInterview.n === 1,
+    `velocity: Assessment→Interview expected n=1, got ${assessmentVelocity.assessmentToInterview.n}`);
+  check(assessmentVelocity.respondedToInterview.n === 0,
+    `velocity: Assessment path must not count as legacy Responded→Interview, got n=${assessmentVelocity.respondedToInterview.n}`);
+
   // three completed A→R measurements → median renders
   const logWithThird = LOG_FIXTURE + '\n4\t2026-06-27\tApplied\tResponded\tset-status\t';
   const v3 = computeVelocity(foldObservations(parseStatusLog(logWithThird, states).observations), TODAY);
@@ -665,7 +692,7 @@ function selfTest() {
   check(led.calibration.basis === 'ledger', 'ledger-funnel: log present → ledger basis');
   check(led.calibration.everApplied === 25, `ledger-funnel: everApplied still 25, got ${led.calibration.everApplied}`);
   check(led.calibration.interviewRate.ownPct === 8, `ledger-funnel: 2/25 reached Interview → 8%, got ${led.calibration.interviewRate.ownPct}`);
-  check(led.calibration.responseRate.ownPct === 12, `ledger-funnel: 3/25 reached Responded → 12%, got ${led.calibration.responseRate.ownPct}`);
+  check(led.calibration.responseRate.ownPct === 16, `ledger-funnel: 4/25 received a reply including rejection → 16%, got ${led.calibration.responseRate.ownPct}`);
   check(renderSummary(led, TODAY).includes('rates fold status-log history'), 'ledger-funnel: summary flags the folded basis');
   check(!renderSummary(snap, TODAY).includes('rates fold status-log history'), 'ledger-funnel: snapshot summary carries no fold note');
 

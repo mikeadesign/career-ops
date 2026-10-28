@@ -328,11 +328,11 @@ func ComputeStatsMetrics(apps []model.CareerApplication) model.StatsMetrics {
 
 	// 5. Score Quality Tiers for Pie Chart breakdown
 	tierCounts := map[string]int{
-		"Elite (≥4.5)":      0,
-		"Strong (4.0-4.4)":  0,
-		"Viable (3.5-3.9)":  0,
+		"Elite (≥4.5)":       0,
+		"Strong (4.0-4.4)":   0,
+		"Viable (3.5-3.9)":   0,
 		"Moderate (3.0-3.4)": 0,
-		"Below Bar (<3.0)":  0,
+		"Below Bar (<3.0)":   0,
 	}
 	scoreTotal := 0
 	for _, app := range apps {
@@ -445,7 +445,7 @@ func GenerateInsights(sm model.StatsMetrics) []string {
 	if len(sm.WorkModes) > 0 {
 		topMode := sm.WorkModes[0]
 		insights = append(insights, fmt.Sprintf(i18n.Current.InsightWorkMode,
-			topMode.Pct, topMode.Label))
+			topMode.Pct, i18n.Current.WorkModeLabel(topMode.Label)))
 	}
 
 	// Pay insight

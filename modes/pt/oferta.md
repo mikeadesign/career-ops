@@ -115,8 +115,11 @@ Salvar avaliação completa em `reports/{###}-{company-slug}-{YYYY-MM-DD}.md`.
 **Data:** {YYYY-MM-DD}
 **Arquétipo:** {detectado}
 **Score:** {X/5}
+**Decisão:** {Candidatar | Considerar | Pesquisar primeiro | Não candidatar}
 **URL:** {URL da vaga}
 **PDF:** {caminho ou pendente}
+
+{a frase de candidatar ou não, copiada palavra por palavra}
 
 ---
 
@@ -149,7 +152,7 @@ Salvar avaliação completa em `reports/{###}-{company-slug}-{YYYY-MM-DD}.md`.
 
 ### 2. Registrar no tracker
 
-**SEMPRE** registrar em `data/applications.md`:
+**SEMPRE** registrar no tracker. Escrever um TSV (regra 9 de `_shared.md`) e mesclá-lo com `node merge-tracker.mjs`; nunca escrever uma linha diretamente em `data/applications.md`. Campos:
 - Próximo número sequencial
 - Data atual
 - Empresa

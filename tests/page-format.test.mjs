@@ -35,6 +35,7 @@ import {
   normalizePageFormat,
   resolvePageFormat,
 } from '../lib/page-format.mjs';
+import { describeSpawn, exitedNonZero } from './helpers/describe-spawn.mjs';
 
 /** A throwaway workspace whose config/profile.yml states `pageFormat`, or none. */
 function workspace(pageFormat) {
@@ -224,7 +225,7 @@ test('generate-pdf: an unrecognized --format is still a hard error', () => {
     env: workspaceEnv(dir),
     encoding: 'utf-8',
   });
-  assert.notEqual(res.status, 0);
+  assert.ok(exitedNonZero(res), describeSpawn(res, 'expected a non-zero exit'));
   assert.match(res.stderr, /Invalid format "legal"/);
 });
 
@@ -243,12 +244,22 @@ function coverSandbox() {
   // exits 0 having done nothing (#3165).
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'career-ops-cover-format-')));
   mkdirSync(join(dir, 'lib'), { recursive: true });
+  mkdirSync(join(dir, 'providers'), { recursive: true });
   mkdirSync(join(dir, 'templates'), { recursive: true });
   mkdirSync(join(dir, 'output'), { recursive: true });
   for (const f of ['generate-cover-letter.mjs', 'verify-cv-facts.mjs', 'cv-templates.mjs', 'path-resolver.mjs']) {
     copyFileSync(join(ROOT, f), join(dir, f));
   }
   copyFileSync(join(ROOT, 'lib', 'is-main-module.mjs'), join(dir, 'lib', 'is-main-module.mjs'));
+  copyFileSync(join(ROOT, 'lib', 'yaml-document.mjs'), join(dir, 'lib', 'yaml-document.mjs'));
+  // cv-templates.mjs decodes HTML entities when it reads a template's meta
+  // block, so the sandbox needs this too. Without it the copied script dies at
+  // module load with ERR_MODULE_NOT_FOUND and the format assertion below never
+  // runs. The module imports nothing, so it closes the graph on its own.
+  copyFileSync(join(ROOT, 'providers', '_html-entities.mjs'), join(dir, 'providers', '_html-entities.mjs'));
+  // Same reason: cv-templates.mjs reads the template manifest block and the
+  // section vocabulary from here, so the sandbox dies at module load without it.
+  copyFileSync(join(ROOT, 'lib', 'template-manifest.mjs'), join(dir, 'lib', 'template-manifest.mjs'));
   // The resolver is here so a cover letter that starts calling it fails on the
   // assertion below and not on a missing module. Resolving early is the quiet
   // form of this bug: it reads no profile path, so every letter gets the

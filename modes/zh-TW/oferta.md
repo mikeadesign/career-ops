@@ -189,9 +189,29 @@
 
 ---
 
+## 結論 (lead)
+
+在 Block G 之後、`## Risk Summary` 之前寫入 `## 結論 (lead)` 區塊。它回答讀者打開報告時唯一想問的問題：我該投遞嗎？
+
+**衍生，絕不自行判斷。** `## Machine Summary` 中的 `final_decision` 是唯一事實來源。本區塊以一句話複述同一判斷，絕不引入另一個判斷——若兩者不一致，以欄位為準，本區塊即為缺陷。粗體的判斷即該欄位的值：Apply、Consider、Research first 或 Skip。
+
+**`(lead)` 標記承擔實際作用，且刻意與語言無關。** 網頁報告檢視憑該標記（而非標題詞或區塊字母）將對應區塊提升為頁首重點，因此譯文保留各自的名詞與同一括註：`## 結論 (lead)`、`## Verdict (lead)`。切勿翻譯 `(lead)`，也不要為本區塊編字母——它不屬於 A–H 序列。
+
+**不引入新判斷。** 寫到此處時全部輸入均已齊備。給出判斷，外加一條源自報告已確立內容的理由；不要重新評分，不要補充證據。
+
+區塊格式：
+
+```markdown
+## 結論 (lead)
+
+**Apply.** 核心能力軸高度匹配且無硬性阻斷，維度 G 為 High Confidence。
+```
+
+---
+
 ## Risk Summary (Block G 之後)
 
-在 Block G 之後、Block H 之前，以 `## Risk Summary` 區塊收尾報告本文 —— 每個風險訊號一列，順序固定 —— 讓候選人真正關心的問題（「這家公司值得加入嗎？」）在一個畫面內得到解答，而不必自己去拼湊 Block A、Block G 與外部檔案。
+在緊接 Block G 的 `## 結論 (lead)` 區塊之後、Block H 之前，以 `## Risk Summary` 區塊收尾報告本文 —— 每個風險訊號一列，順序固定 —— 讓候選人真正關心的問題（「這家公司值得加入嗎？」）在一個畫面內得到解答，而不必自己去拼湊 Block A、Block G 與外部檔案。
 
 **只做彙整，不產生新判斷。** 每一列都引用來源訊號已經得出的結論。摘要絕不重新評分、重新加權或推翻原判斷 —— 如果某一列看起來有問題，應當修正來源訊號，而不是改這裡。
 
@@ -242,8 +262,11 @@
 **URL:** {職缺原連結}
 **Archetype:** {偵測到的原型分類}
 **Score:** {X/5}
+**決定:** {應徵 | 考慮 | 先調查 | 略過}
 **Legitimacy:** {高信心 | 審慎推進 | 疑似虛假}
 **PDF:** {CV 產生狀態，如 ❌ 或 ✅}
+
+{`## 結論 (lead)` 的那一句，逐字複製}
 
 ---
 
@@ -268,6 +291,9 @@
 ## G) 職缺真實性評估
 (此處填入維度 G 的詳細訊號分析)
 
+## 結論 (lead)
+(一句話給出投或不投的判斷 —— 複述 `final_decision`，見上文結論一節)
+
 ## Risk Summary
 (每個風險訊號一列，順序固定 —— 見上文 Risk Summary 一節)
 
@@ -278,11 +304,16 @@
 
 ## ATS 關鍵字擷取
 (列出 15–20 個從該 JD 中擷取的高頻核心技術／業務關鍵字，用於履歷最佳化)
+
+## Job Description (archived verbatim)
+（職缺描述全文，逐字貼上——見下方要求）
 ```
+
+**JD 存檔（必要，#2789）：** 每份報告都必須包含 `## Job Description (archived verbatim)` 一節，原樣貼上職缺描述全文，不得摘要或改寫。該標題維持英文，因為 `check-jd-archive.mjs` 依名稱尋找它。`**URL:**` 不是存檔：職缺關閉後連結就會失效，原始要求也再也找不回來。該節第一行寫來源上可見的刊登日期（`Posted: {日期或頁面上顯示的相對時間}`，確實沒有時寫 `Posted: not visible in source`），不要用報告檔案本身的時間代替。若 JD 過長或無法完整引用，用 `archive-posting.mjs <url> --company={company-slug} --report={num}` 存檔，並在該節中**只**寫這一句：`See jds/{filename} for the full archive (archive-posting.mjs --report={num}).`。不得以改寫代替原文；完整規則見 `modes/oferta.md` 的 **JD archival**。
 
 ### 2. 登錄到 Tracker 紀錄簿
 
-在 `data/applications.md` 的末尾追加這筆紀錄：
+將這筆紀錄登記到 tracker：寫入 TSV 檔（`_shared.md` 的規則 9），再以 `node merge-tracker.mjs` 合併；嚴禁直接在 `data/applications.md` 中手動新增資料列。欄位：
 - 依序遞增的 ID 編號
 - 日期
 - 公司名稱

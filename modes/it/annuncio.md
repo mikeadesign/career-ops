@@ -115,8 +115,11 @@ Salvare la valutazione completa in `reports/{###}-{company-slug}-{YYYY-MM-DD}.md
 **Data:** {YYYY-MM-DD}
 **Archetipo:** {rilevato}
 **Punteggio:** {X/5}
+**Decisione:** {Candidarsi | Valutare | Approfondire prima | Scartare}
 **URL:** {URL dell'annuncio}
 **PDF:** {percorso del file o in attesa}
+
+{la frase candidarsi o no, copiata parola per parola}
 
 ---
 
@@ -149,7 +152,7 @@ Salvare la valutazione completa in `reports/{###}-{company-slug}-{YYYY-MM-DD}.md
 
 ### 2. Registrare nel tracker
 
-Registrare **SEMPRE** la valutazione in `data/applications.md`:
+Registrare **SEMPRE** la valutazione nel tracker. Scrivere un TSV (regola 9 di `_shared.md`) e unirlo con `node merge-tracker.mjs`; non scrivere mai una riga direttamente in `data/applications.md`. Campi:
 - Prossimo numero sequenziale
 - Data odierna
 - Azienda

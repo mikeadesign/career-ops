@@ -115,8 +115,11 @@ Gem den fulde evaluering i `reports/{###}-{company-slug}-{YYYY-MM-DD}.md`.
 **Dato:** {YYYY-MM-DD}
 **Arketype:** {detekteret}
 **Score:** {X/5}
+**Beslutning:** {Søg | Overvej | Undersøg først | Spring over}
 **URL:** {opslagets URL}
 **PDF:** {sti eller afventer}
+
+{sætningen om at søge, kopieret ordret}
 
 ---
 
@@ -149,7 +152,7 @@ Gem den fulde evaluering i `reports/{###}-{company-slug}-{YYYY-MM-DD}.md`.
 
 ### 2. Registrér i trackeren
 
-**ALTID** registrér i `data/applications.md`:
+**ALTID** registrér i trackeren. Skriv en TSV (regel 9 i `_shared.md`) og flet den med `node merge-tracker.mjs`; skriv aldrig en række direkte i `data/applications.md`. Felter:
 - Næste fortløbende nummer
 - Dagens dato
 - Virksomhed

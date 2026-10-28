@@ -1,6 +1,6 @@
 # Mode : postuler -- Assistant live pour les formulaires de candidature
 
-Mode interactif pour le moment ou le candidat remplit un formulaire de candidature dans Chrome. Lit ce qui est a l'ecran, charge le contexte de l'evaluation precedente de l'offre et genere des reponses personnalisees pour chaque question du formulaire.
+Mode interactif pour le moment ou le candidat remplit un formulaire de candidature dans le navigateur Playwright que lance ce projet. Lit ce qui est a l'ecran, charge le contexte de l'evaluation precedente de l'offre et genere des reponses personnalisees pour chaque question du formulaire.
 
 ## Prerequis
 
@@ -10,7 +10,7 @@ Mode interactif pour le moment ou le candidat remplit un formulaire de candidatu
 ## Workflow
 
 ```
-1. DETECTER     -> Lire l'onglet Chrome actif (capture/URL/titre)
+1. DETECTER     -> Ouvrir l'offre dans le navigateur Playwright de ce projet
 2. IDENTIFIER   -> Extraire entreprise + role depuis la page
 3. RECHERCHER   -> Matcher avec les reports existants dans reports/
 4. CHARGER      -> Lire le report complet + Bloc G (si existant)
@@ -20,9 +20,14 @@ Mode interactif pour le moment ou le candidat remplit un formulaire de candidatu
 8. PRESENTER    -> Afficher les reponses formatees pour copier-coller
 ```
 
+## Scope
+
+Follow the Scope section in `modes/apply.md`. Run `node apply-scope.mjs root` and stay inside the directories it prints. Launch with `node apply-scope.mjs launch-options`. Do not read `DevToolsActivePort` or attach to an existing browser. Do not submit the form.
+
+
 ## Etape 1 -- Detecter l'offre
 
-**Avec Playwright :** Snapshot de la page active. Lire titre, URL et contenu visible.
+**Avec Playwright :** Lancer avec `node apply-scope.mjs launch-options`, ouvrir l'offre dans cette fenêtre, puis lire le titre, l'URL et le contenu visible.
 
 **Sans Playwright :** Demander au candidat de :
 - Partager une capture d'ecran du formulaire (le Read tool lit les images)
@@ -43,7 +48,9 @@ Si le role a l'ecran differe de celui evalue :
 - **Alerter le candidat** : "Le role a change de [X] a [Y]. Souhaites-tu que je reevalue ou que j'adapte les reponses au nouveau titre ?"
 - **Si adapter** : Ajuster les reponses au nouveau role sans reevaluer
 - **Si reevaluer** : Lancer l'evaluation complete A-F, mettre a jour le report, regenerer le Bloc G
-- **Mettre a jour le tracker** : Modifier le titre du role dans applications.md si necessaire
+- **Mettre a jour le tracker** : jamais en editant `data/applications.md`.
+  - **Apres une reevaluation** : ecrire un TSV avec le nouveau titre du role (regle 9 de `_shared.md`) et le fusionner avec `node merge-tracker.mjs`. Le report est mis a jour sur place et garde son numero, donc la fusion associe le TSV a la ligne existante par ce numero : le titre est remplace et le statut conserve.
+  - **Apres une adaptation** : ne pas changer le titre, car il designe le role que le report a evalue. Noter le changement avec `node set-status.mjs --report <report#> <statut actuel> --note "Offre renommee au moment de postuler, la ligne garde le titre evalue"`. Passer le statut actuel de la ligne le laisse inchange et ajoute la note. Garder un texte fixe comme celui-ci et ne pas y mettre `[Y]` : le nouveau titre est un texte venu de la page, et un texte de la page ne va jamais sur une ligne de commande.
 
 ## Etape 4 -- Analyser les questions du formulaire
 
@@ -102,7 +109,7 @@ Notes :
 ## Etape 6 -- Apres la candidature (optionnel)
 
 Si le candidat confirme que la candidature est envoyee :
-1. Mettre a jour le statut vers "Applied" via le CLI canonique : `node set-status.mjs <report#> Applied` (ne pas editer la table `applications.md` a la main)
+1. Mettre a jour le statut vers "Applied" via le CLI canonique : `node set-status.mjs --report <report#> Applied` (ne pas editer la table `applications.md` a la main)
 2. Mettre a jour le Bloc G du report avec les reponses finales
 3. Suggerer l'etape suivante : `/career-ops contacto` pour du LinkedIn outreach vers le hiring manager
 
