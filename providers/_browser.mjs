@@ -8,9 +8,34 @@
 //
 // The browser is launched on first fetch and closed at process exit.
 
-import { fetchJson as httpFetchJson, assertSafeHttpUrl } from './_http.mjs';
+import { fetchJson as httpFetchJson } from './_http.mjs';
+import { isBlockedAddress } from './_ip-guard.mjs';
 
 const DEFAULT_NAVIGATE_TIMEOUT_MS = 30_000;
+
+// LOCAL FIX 2026-10-09: _http.mjs no longer exports assertSafeHttpUrl (dropped by
+// commit 12d98b58 when the HTTP transport moved to the address-level _ip-guard),
+// which made this module — and so mid-filter.mjs — fail to load. This keeps the
+// pre-navigation check for the browser transport, where the _ip-guard's DNS hook
+// does not apply (Chromium resolves names itself). It rejects non-http(s) schemes,
+// well-known local names, and private/loopback IP literals. It cannot catch a public
+// name that resolves to a private address; that gap existed in the old string check too.
+function assertSafeHttpUrl(rawUrl) {
+  if (!rawUrl) throw new Error('Missing URL');
+  let u;
+  try { u = new URL(rawUrl); } catch {
+    throw new Error(`Unparseable URL: ${String(rawUrl).slice(0, 80)}`);
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+    throw new Error(`Unsupported URL protocol: ${u.protocol}`);
+  }
+  const host = u.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  const isIpLiteral = host.includes(':') || /^[0-9.]+$/.test(host);
+  const isLocalName = host === 'localhost' || /\.(localhost|local|internal)$/.test(host);
+  if (isLocalName || (isIpLiteral && isBlockedAddress(host))) {
+    throw new Error(`Blocked URL host (loopback/private): ${host}`);
+  }
+}
 let browserPromise = null;
 
 async function getBrowser() {
